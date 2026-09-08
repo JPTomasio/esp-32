@@ -1,0 +1,15 @@
+# Configuracao com a senha do WiFi. NAO versionar: o repositorio e publico.
+# Use config.exemplo.h como modelo.
+firmware/02_monitor_postura/config.h
+
+# Banco de dados gerado em tempo de execucao
+servidor/*.db
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Sistema
+.DS_Store
