@@ -137,11 +137,45 @@ esp32/
 │   ├── simulador.py           gera eventos falsos para teste
 │   └── requirements.txt
 ├── testes/                    testes que rodam no PC, sem a placa
+├── evidencias/                script que gera as provas de funcionamento
 └── README.md
 ```
 
 Os testes em `testes/` validam a lógica do firmware e as consultas do servidor
 sem precisar do hardware montado. Veja `testes/README.md`.
+
+## Evidencias de funcionamento
+
+Para a entrega, existe um script que gera automaticamente as provas de que o
+sistema funciona, sem precisar da placa montada:
+
+```bash
+uv venv .venv-evidencias
+uv pip install --python .venv-evidencias -r servidor/requirements.txt
+bash evidencias/gera_evidencias.sh
+```
+
+> Sem o `uv`, um venv comum resolve:
+> `python3 -m venv .venv-evidencias && .venv-evidencias/bin/pip install -r servidor/requirements.txt`
+
+Em cerca de um minuto ele roda os dois testes, sobe o servidor num banco
+separado (nao encosta no `postura.db` do grupo), grava as chamadas HTTP que o
+ESP32 faz, roda o simulador por 45 s, captura o dashboard nos estados de alerta
+e de postura correta, e despeja o conteudo do banco. Tudo vai para
+`evidencias/saida/`, com um `RESUMO.md` explicando o que cada arquivo prova.
+
+A pasta `evidencias/saida/` **nao e versionada** — o script e regenera em um
+minuto, e a saida inclui um banco binario. Rode o script antes da entrega e
+anexe a pasta, ou gere na hora da apresentacao.
+
+Antes de fechar, o script limpa os logs: IPs da rede local viram
+`[ip-local-omitido]`, caminhos absolutos viram relativos e os codigos de cor do
+Flask sao removidos. Assim a pasta pode ser entregue ou versionada sem levar
+junto o IP da sua maquina nem o caminho da sua pasta pessoal.
+
+O que o script **nao** cobre, por depender do hardware: log do Monitor Serial,
+video do buzzer disparando, e a foto da montagem com o angulo-limite. O
+`RESUMO.md` gerado lista essas quatro pendencias com instrucoes.
 
 ## O que ainda falta
 
@@ -149,4 +183,5 @@ sem precisar do hardware montado. Veja `testes/README.md`.
   marcado em `app.py`, na função `receber_evento`.
 - Alimentação por bateria, para o protótipo não ficar preso ao cabo USB.
 - Definir e documentar o ângulo-limite escolhido pelo grupo, com foto da
-  montagem — vale como evidência na entrega.
+  montagem — é a única documentação possível da calibragem, já que o SW-520D
+  não mede ângulo. Vale como evidência na entrega.

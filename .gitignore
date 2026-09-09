@@ -5,11 +5,17 @@ firmware/02_monitor_postura/config.h
 # Banco de dados gerado em tempo de execucao
 servidor/*.db
 
+# Evidencias geradas por evidencias/gera_evidencias.sh. O script e versionado,
+# a saida nao: e regenerada em um minuto e inclui um banco binario.
+evidencias/saida/
+
 # Python
 __pycache__/
 *.py[cod]
 venv/
 .venv/
+# Ambiente criado por evidencias/gera_evidencias.sh
+.venv-evidencias/
 
 # Sistema
 .DS_Store

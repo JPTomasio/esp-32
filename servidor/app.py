@@ -14,6 +14,7 @@ O ESP32 precisa apontar para o IP deste computador no arquivo config.h.
 Descubra o IP com "ip a" (Linux) ou "ipconfig" (Windows).
 """
 
+import os
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,7 +23,10 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-BANCO = Path(__file__).parent / "postura.db"
+# Por padrao o banco fica ao lado do app.py. A variavel de ambiente POSTURA_DB
+# permite apontar para outro arquivo (usada pelo script de evidencias, para nao
+# misturar os dados de demonstracao com os dados reais do grupo).
+BANCO = Path(os.environ.get("POSTURA_DB") or Path(__file__).parent / "postura.db")
 
 
 # ---------------------------------------------------------------------------
