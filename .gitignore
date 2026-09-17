@@ -2,6 +2,15 @@
 # Use config.exemplo.h como modelo.
 firmware/02_monitor_postura/config.h
 
+# Credenciais do Supabase. NAO versionar: o repositorio e publico e a chave
+# service_role da acesso total ao banco. Use .env.exemplo como modelo.
+servidor/.env
+
+# Documentos das entregas. NAO versionar: os enunciados em PDF sao material do
+# professor e o documento do grupo traz nome completo e matricula dos seis
+# integrantes -- este repositorio e publico.
+docs/
+
 # Banco de dados gerado em tempo de execucao
 servidor/*.db
 

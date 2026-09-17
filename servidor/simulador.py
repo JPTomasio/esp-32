@@ -7,15 +7,25 @@ Gera eventos falsos de postura, como se um ESP32 real estivesse enviando.
 Como usar (em dois terminais):
     terminal 1:  python app.py
     terminal 2:  python simulador.py
+
+Com a nuvem configurada, os eventos gerados aqui sobem para o Supabase igual
+aos de um ESP32 de verdade -- e assim que as evidencias da Etapa 4 sao geradas
+sem a placa montada.
 """
 
+import os
 import random
 import time
 
 import requests
 
-URL = "http://localhost:5000/api/eventos"
-DISPOSITIVO = "esp32-simulado"
+# Configuraveis por variavel de ambiente para o script de evidencias poder usar
+# um nome de dispositivo diferente em cada execucao. Isso importa por causa da
+# nuvem: a tabela tem UNIQUE (dispositivo, id_local), entao repetir o mesmo
+# nome com um banco local recriado sobrescreveria as linhas da rodada anterior
+# em vez de acrescentar novas.
+URL = os.environ.get("SIMULADOR_URL", "http://localhost:5000/api/eventos")
+DISPOSITIVO = os.environ.get("SIMULADOR_DISPOSITIVO", "esp32-simulado")
 
 
 def enviar(tipo, frente=False, lateral=False, duracao=0, alertas=0, uptime=0):

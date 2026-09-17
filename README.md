@@ -1,8 +1,19 @@
 # Monitor de Postura — ESP32 + SW-520D
 
 Projeto de extensão. Detecta quando o usuário fica em inclinação inadequada
-por tempo prolongado, alerta com buzzer e registra os eventos em um servidor
-Python com dashboard.
+por tempo prolongado, alerta com buzzer e registra os eventos na nuvem, com
+dashboard em tempo real.
+
+```
+SW-520D  →  ESP32  →  HTTP/JSON (Wi-Fi)  →  Python (gateway Flask)
+                                               ├──→ SQLite local  (fila de envio)
+                                               └──→ HTTPS/REST  →  Supabase / PostgreSQL
+                                                                        ↓
+                                                                    Dashboard
+```
+
+O documento da entrega da integração com cloud (`docs/Entrega_4_Resposta.md`)
+não é versionado — veja **Documentos das entregas**, no fim deste arquivo.
 
 ## Componentes
 
@@ -104,7 +115,8 @@ python app.py
 ```
 
 Abre em <http://localhost:5000>. Recebe os eventos do ESP32, grava num SQLite
-(`postura.db`, criado sozinho) e mostra um dashboard que atualiza a cada 2 s.
+(`postura.db`, criado sozinho), replica para a nuvem e mostra um dashboard que
+atualiza a cada 2 s.
 
 **Para testar sem a placa montada**, em outro terminal:
 
@@ -113,7 +125,55 @@ python simulador.py
 ```
 
 Ele gera eventos falsos como se fosse um ESP32 real — útil para desenvolver o
-dashboard enquanto a parte física não está pronta.
+dashboard enquanto a parte física não está pronta. Com a nuvem configurada,
+esses eventos sobem para o Supabase igual aos de uma placa de verdade.
+
+### Etapa 4 — nuvem (Supabase)
+
+O servidor Python deixa de ser o destino dos dados e passa a ser um **gateway**:
+grava no SQLite local e replica cada evento para um PostgreSQL na nuvem. O
+dashboard então lê da nuvem.
+
+**1. Criar o projeto**
+
+<https://supabase.com> → *Start your project* → login com GitHub → *New project*.
+Região **South America (São Paulo)**. Plano gratuito, não pede cartão.
+
+**2. Criar a estrutura do banco**
+
+No painel do projeto: *SQL Editor* → *New query* → cole o conteúdo de
+`servidor/esquema_supabase.sql` → *Run*. Isso cria a tabela `eventos`, os
+índices, a view `estatisticas_24h` e liga o RLS.
+
+**3. Configurar as credenciais**
+
+```bash
+cp servidor/.env.exemplo servidor/.env
+```
+
+Os valores estão em *Project Settings → API*: **Project URL** e a chave
+**`service_role`**.
+
+O `.env` está no `.gitignore` de propósito, junto com o `config.h`: a chave
+`service_role` dá acesso total ao banco e **este repositório é público**.
+
+**4. Rodar**
+
+```bash
+cd servidor && python app.py
+```
+
+O servidor imprime na subida se conseguiu falar com a nuvem. Para conferir
+depois: <http://localhost:5000/api/nuvem>.
+
+**O sistema funciona sem nuvem.** Sem o `.env`, tudo roda local como na Etapa 3
+— o dashboard mostra um selo amarelo avisando que os dados vieram do banco
+local. E com a nuvem configurada, se a internet cair no meio do uso, o buzzer
+continua alertando e os eventos ficam numa fila no SQLite (coluna
+`enviado_nuvem = 0`), que sobe sozinha quando a conexão volta. Nada se perde.
+
+O dashboard mostra sempre de onde vieram os números na tela, em vez de fingir
+que está tudo bem.
 
 ### Descobrir o IP do computador
 
@@ -133,16 +193,23 @@ esp32/
 │   ├── 01_teste_sensores/     validação dos sensores, sem WiFi
 │   └── 02_monitor_postura/    firmware completo + config.h
 ├── servidor/
-│   ├── app.py                 API Flask + SQLite + dashboard
+│   ├── app.py                 gateway Flask + fila SQLite + dashboard
+│   ├── nuvem.py               integração com o Supabase (única parte que
+│   │                          fala com a internet)
+│   ├── esquema_supabase.sql   tabela, índices, view e RLS da nuvem
+│   ├── .env.exemplo           modelo das credenciais (o .env não é versionado)
 │   ├── simulador.py           gera eventos falsos para teste
 │   └── requirements.txt
 ├── testes/                    testes que rodam no PC, sem a placa
 ├── evidencias/                script que gera as provas de funcionamento
+├── ferramentas/               conversor dos documentos para PDF
+├── docs/                      documentos das entregas (não versionado)
 └── README.md
 ```
 
-Os testes em `testes/` validam a lógica do firmware e as consultas do servidor
-sem precisar do hardware montado. Veja `testes/README.md`.
+Os testes em `testes/` validam a lógica do firmware, as consultas do servidor e
+a integração com a nuvem sem precisar do hardware montado nem de internet. Veja
+`testes/README.md`.
 
 ## Evidencias de funcionamento
 
@@ -158,24 +225,48 @@ bash evidencias/gera_evidencias.sh
 > Sem o `uv`, um venv comum resolve:
 > `python3 -m venv .venv-evidencias && .venv-evidencias/bin/pip install -r servidor/requirements.txt`
 
-Em cerca de um minuto ele roda os dois testes, sobe o servidor num banco
+Em cerca de um minuto ele roda os tres testes, sobe o servidor num banco
 separado (nao encosta no `postura.db` do grupo), grava as chamadas HTTP que o
 ESP32 faz, roda o simulador por 45 s, captura o dashboard nos estados de alerta
-e de postura correta, e despeja o conteudo do banco. Tudo vai para
+e de postura correta, despeja o conteudo do banco local e **consulta o Supabase
+com `curl` para provar que os dados chegaram na nuvem**. Tudo vai para
 `evidencias/saida/`, com um `RESUMO.md` explicando o que cada arquivo prova.
+
+Se `servidor/.env` nao estiver configurado, a etapa da nuvem e pulada com uma
+explicacao no log e o resto roda normalmente.
 
 A pasta `evidencias/saida/` **nao e versionada** — o script e regenera em um
 minuto, e a saida inclui um banco binario. Rode o script antes da entrega e
 anexe a pasta, ou gere na hora da apresentacao.
 
 Antes de fechar, o script limpa os logs: IPs da rede local viram
-`[ip-local-omitido]`, caminhos absolutos viram relativos e os codigos de cor do
-Flask sao removidos. Assim a pasta pode ser entregue ou versionada sem levar
-junto o IP da sua maquina nem o caminho da sua pasta pessoal.
+`[ip-local-omitido]`, caminhos absolutos viram relativos, os codigos de cor do
+Flask sao removidos e **a chave do Supabase e apagada**. Assim a pasta pode ser
+entregue ou versionada sem levar junto o IP da sua maquina, o caminho da sua
+pasta pessoal nem a credencial da nuvem. No final o script confere de novo se a
+chave vazou em algum arquivo e aborta se encontrar.
 
-O que o script **nao** cobre, por depender do hardware: log do Monitor Serial,
-video do buzzer disparando, e a foto da montagem com o angulo-limite. O
-`RESUMO.md` gerado lista essas quatro pendencias com instrucoes.
+O que o script **nao** cobre: o print do painel do Supabase (exige login) e as
+evidencias que dependem do hardware montado -- log do Monitor Serial, video do
+buzzer disparando e a foto da montagem com o angulo-limite. O `RESUMO.md`
+gerado lista essas pendencias com instrucoes, inclusive o nome do dispositivo
+para filtrar no painel da nuvem.
+
+## Documentos das entregas
+
+Os documentos ficam em `docs/`, que **não é versionado**: os enunciados em PDF
+são material do professor, e o documento do grupo traz nome completo e matrícula
+dos seis integrantes — este repositório é público.
+
+Quem for editar precisa da pasta compartilhada pelo grupo. O documento é escrito
+em Markdown e convertido para PDF por `ferramentas/md_para_pdf.py`:
+
+```bash
+uv pip install --python .venv-evidencias markdown weasyprint
+.venv-evidencias/bin/python ferramentas/md_para_pdf.py docs/Entrega_4_Resposta.md
+```
+
+O Markdown é a fonte: edite o `.md` e gere o PDF de novo, nunca o contrário.
 
 ## O que ainda falta
 

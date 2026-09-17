@@ -27,4 +27,24 @@ precisar do Flask instalado.
 python3 testes/teste_sql.py
 ```
 
-Os dois retornam código de saída 0 quando passam.
+## Integração com a nuvem
+
+Testa o caminho até o Supabase **sem precisar de internet**. O teste sobe um
+servidor HTTP local que imita o PostgREST do Supabase e aponta o `SUPABASE_URL`
+para ele.
+
+```bash
+python testes/teste_nuvem.py
+```
+
+Precisa do `flask` e do `requests` instalados (`servidor/requirements.txt`).
+
+Verifica o formato exato do JSON que sai para a nuvem, os cabeçalhos de
+autenticação, as consultas que o dashboard faz e três comportamentos que só
+aparecem quando algo dá errado:
+
+- **nuvem fora do ar** — o ESP32 ainda recebe `201` e o evento fica na fila;
+- **nuvem de volta** — o pendente sobe sozinho, nada se perde;
+- **reenvio do mesmo evento** — o upsert atualiza a linha em vez de duplicar.
+
+Os três retornam código de saída 0 quando passam.

@@ -1,11 +1,23 @@
 """
-ETAPA 3 - Servidor Python do monitor de postura.
+ETAPA 3 + ETAPA 4 - Gateway Python do monitor de postura.
 
-Recebe os eventos que o ESP32 envia por HTTP, guarda em um banco SQLite
-e mostra um dashboard simples no navegador.
+Recebe os eventos que o ESP32 envia por HTTP na rede local, guarda em um banco
+SQLite e replica cada evento para a nuvem (Supabase / PostgreSQL). O dashboard
+le da nuvem.
+
+    SW-520D -> ESP32 -> HTTP/JSON -> [ ESTE ARQUIVO ] -> SQLite local (fila)
+                                                      -> HTTPS/REST -> Supabase
+                                                                          |
+                                                                    dashboard
+
+O SQLite nao e mais o destino dos dados: e uma fila. Todo evento entra nele com
+enviado_nuvem = 0 e uma thread em segundo plano vai empurrando para a nuvem.
+Se a internet cair, o ESP32 continua alertando, o Python continua registrando,
+e os eventos pendentes sobem quando a conexao voltar.
 
 Como rodar:
     pip install -r requirements.txt
+    cp .env.exemplo .env      # e preencha com as credenciais do Supabase
     python app.py
 
 Depois abra http://localhost:5000 no navegador.
@@ -16,10 +28,16 @@ Descubra o IP com "ip a" (Linux) ou "ipconfig" (Windows).
 
 import os
 import sqlite3
+import threading
+import time
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import requests
 from flask import Flask, jsonify, request
+
+import nuvem
 
 app = Flask(__name__)
 
@@ -28,19 +46,32 @@ app = Flask(__name__)
 # misturar os dados de demonstracao com os dados reais do grupo).
 BANCO = Path(os.environ.get("POSTURA_DB") or Path(__file__).parent / "postura.db")
 
+# De quanto em quanto tempo a thread de sincronizacao tenta esvaziar a fila.
+# Ela tambem e acordada na hora por cada evento novo, entao este valor so vale
+# para as retentativas depois de uma falha.
+INTERVALO_SINCRONIA_S = float(os.environ.get("INTERVALO_SINCRONIA_S", 5))
+
+# Quantos eventos pendentes vao por requisicao. Em lote para nao fazer uma
+# chamada HTTPS por evento quando a fila acumula depois de uma queda de rede.
+LOTE_SINCRONIA = 50
+
+# O dashboard consulta /api/status a cada 2s. Sem este cache, cada aba aberta
+# viraria varias chamadas por segundo para a nuvem sem necessidade.
+CACHE_STATUS_S = 2.0
+
 
 # ---------------------------------------------------------------------------
-# Banco de dados
+# Banco de dados local (fila de envio)
 # ---------------------------------------------------------------------------
 
 def conectar():
-    conexao = sqlite3.connect(BANCO)
+    conexao = sqlite3.connect(BANCO, timeout=10)
     conexao.row_factory = sqlite3.Row
     return conexao
 
 
 def criar_tabelas():
-    with conectar() as conexao:
+    with closing(conectar()) as conexao, conexao:
         conexao.execute(
             """
             CREATE TABLE IF NOT EXISTS eventos (
@@ -52,13 +83,153 @@ def criar_tabelas():
                 duracao_s         INTEGER NOT NULL DEFAULT 0,
                 total_alertas     INTEGER NOT NULL DEFAULT 0,
                 uptime_s          INTEGER NOT NULL DEFAULT 0,
-                recebido_em       TEXT    NOT NULL
+                recebido_em       TEXT    NOT NULL,
+                enviado_nuvem     INTEGER NOT NULL DEFAULT 0
             )
             """
         )
         conexao.execute(
             "CREATE INDEX IF NOT EXISTS idx_recebido ON eventos(recebido_em)"
         )
+
+        # Bancos criados antes da Etapa 4 nao tem a coluna enviado_nuvem.
+        # Em vez de pedir para apagar o postura.db (o que jogaria fora os dados
+        # das entregas anteriores), acrescentamos a coluna.
+        colunas = {
+            linha["name"]
+            for linha in conexao.execute("PRAGMA table_info(eventos)")
+        }
+        if "enviado_nuvem" not in colunas:
+            print("[banco] migrando: adicionando coluna enviado_nuvem")
+            conexao.execute(
+                "ALTER TABLE eventos ADD COLUMN enviado_nuvem INTEGER NOT NULL DEFAULT 0"
+            )
+
+        # Indice parcial: so indexa o que ainda falta enviar. A fila normalmente
+        # tem zero linhas, entao esta consulta fica praticamente de graca.
+        conexao.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pendentes
+            ON eventos(id) WHERE enviado_nuvem = 0
+            """
+        )
+
+
+def contar_pendentes():
+    with closing(conectar()) as conexao:
+        return conexao.execute(
+            "SELECT COUNT(*) FROM eventos WHERE enviado_nuvem = 0"
+        ).fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Sincronizacao com a nuvem
+# ---------------------------------------------------------------------------
+
+# Acorda a thread de sincronizacao assim que um evento novo chega, para o dado
+# subir na hora em vez de esperar o proximo ciclo.
+tem_novidade = threading.Event()
+
+# Ultimo resultado da sincronizacao, exposto em /api/nuvem e no dashboard.
+estado_nuvem = {
+    "configurada": False,
+    "ok": None,          # None = ainda nao tentou
+    "ultimo_envio": None,
+    "ultimo_erro": None,
+    "enviados_na_sessao": 0,
+}
+
+
+def sincronizar_uma_vez():
+    """Envia para a nuvem os eventos que ainda nao subiram.
+
+    Retorna quantos eventos foram confirmados pela nuvem nesta passada.
+    """
+    if not nuvem.configurada():
+        return 0
+
+    with closing(conectar()) as conexao:
+        pendentes = conexao.execute(
+            """
+            SELECT id, dispositivo, tipo, inclinado_frente, inclinado_lateral,
+                   duracao_s, total_alertas, uptime_s, recebido_em
+            FROM eventos
+            WHERE enviado_nuvem = 0
+            ORDER BY id
+            LIMIT ?
+            """,
+            (LOTE_SINCRONIA,),
+        ).fetchall()
+
+    if not pendentes:
+        return 0
+
+    lote = [dict(linha, id_local=linha["id"]) for linha in pendentes]
+
+    try:
+        nuvem.enviar_eventos(lote)
+    except (requests.RequestException, RuntimeError) as erro:
+        # Nao marcamos nada como enviado: as linhas continuam na fila e a
+        # proxima passada tenta de novo. O UNIQUE (dispositivo, id_local) da
+        # tabela na nuvem garante que uma eventual gravacao que deu certo mas
+        # cuja resposta se perdeu nao vire linha duplicada.
+        estado_nuvem["ok"] = False
+        estado_nuvem["ultimo_erro"] = str(erro)
+        print(f"[nuvem] falha ao enviar {len(lote)} evento(s): {erro}")
+        return 0
+
+    ids = [linha["id"] for linha in pendentes]
+    with closing(conectar()) as conexao, conexao:
+        conexao.executemany(
+            "UPDATE eventos SET enviado_nuvem = 1 WHERE id = ?",
+            [(i,) for i in ids],
+        )
+
+    estado_nuvem["ok"] = True
+    estado_nuvem["ultimo_erro"] = None
+    estado_nuvem["ultimo_envio"] = datetime.now().isoformat(timespec="seconds")
+    estado_nuvem["enviados_na_sessao"] += len(ids)
+
+    print(f"[nuvem] {len(ids)} evento(s) gravados no Supabase (ids locais {ids[0]}..{ids[-1]})")
+    return len(ids)
+
+
+def laco_sincronizacao():
+    """Roda em segundo plano durante toda a vida do servidor.
+
+    Fica em thread separada para que a resposta ao ESP32 nao dependa da
+    internet: o firmware recebe o 201 assim que o evento entra no SQLite,
+    e o salto para a nuvem acontece depois.
+    """
+    while True:
+        # Acorda por evento novo ou pelo timeout, o que vier primeiro.
+        tem_novidade.wait(timeout=INTERVALO_SINCRONIA_S)
+        tem_novidade.clear()
+
+        try:
+            # Enquanto houver fila, continua mandando em lotes.
+            while sincronizar_uma_vez() == LOTE_SINCRONIA:
+                pass
+        except Exception as erro:              # noqa: BLE001
+            # A thread nunca pode morrer: se ela cair, o projeto para de
+            # enviar para a nuvem em silencio.
+            estado_nuvem["ok"] = False
+            estado_nuvem["ultimo_erro"] = f"erro inesperado: {erro}"
+            print(f"[nuvem] erro inesperado na sincronizacao: {erro}")
+            time.sleep(INTERVALO_SINCRONIA_S)
+
+
+def iniciar_sincronizacao():
+    estado_nuvem["configurada"] = nuvem.configurada()
+
+    if not nuvem.configurada():
+        print("[nuvem] SUPABASE_URL/SUPABASE_KEY nao configurados em servidor/.env")
+        print("[nuvem] o sistema roda somente local; o dashboard usa o SQLite")
+        return
+
+    thread = threading.Thread(target=laco_sincronizacao, daemon=True)
+    thread.start()
+    print("[nuvem] sincronizacao em segundo plano iniciada")
 
 
 # ---------------------------------------------------------------------------
@@ -83,8 +254,8 @@ def receber_evento():
         datetime.now().isoformat(timespec="seconds"),
     )
 
-    with conectar() as conexao:
-        conexao.execute(
+    with closing(conectar()) as conexao, conexao:
+        cursor = conexao.execute(
             """
             INSERT INTO eventos (dispositivo, tipo, inclinado_frente,
                                  inclinado_lateral, duracao_s, total_alertas,
@@ -93,23 +264,106 @@ def receber_evento():
             """,
             evento,
         )
+        id_local = cursor.lastrowid
 
-    print(f"[{evento[7]}] {evento[0]} -> {evento[1]} (duracao={evento[4]}s)")
+    print(f"[{evento[7]}] {evento[0]} -> {evento[1]} (duracao={evento[4]}s) id={id_local}")
 
     # Aqui entra a notificacao para o celular (Telegram/WhatsApp), quando o
-    # grupo chegar nessa parte. Exemplo comentado em notificador.py.
+    # grupo chegar nessa parte.
     if dados.get("tipo") == "alerta_postura":
         print("  >> ALERTA: usuario com postura inadequada")
 
-    return jsonify({"ok": True}), 201
+    # Avisa a thread de sincronizacao. Responde ao ESP32 sem esperar a nuvem:
+    # o firmware tem timeout curto e nao pode ficar preso esperando a internet.
+    tem_novidade.set()
+
+    return jsonify({"ok": True, "id_local": id_local, "fila_nuvem": True}), 201
 
 
-@app.get("/api/status")
-def status():
-    """Devolve o estado atual e as estatisticas das ultimas 24 horas."""
+# ---------------------------------------------------------------------------
+# Estado consolidado para o dashboard
+# ---------------------------------------------------------------------------
+
+_cache = {"quando": 0.0, "payload": None}
+_trava_cache = threading.Lock()
+
+
+def vazio(origem, detalhe=None):
+    return {
+        "origem": origem,
+        "nuvem_detalhe": detalhe,
+        "conectado": False,
+        "postura_ok": None,
+        "alertas_24h": 0,
+        "tempo_ruim_24h_min": 0,
+        "eventos_na_nuvem": 0,
+        "pendentes_envio": contar_pendentes(),
+        "eventos": [],
+    }
+
+
+def montar_resposta(origem, ultimo, alertas, recentes, total_nuvem, detalhe=None):
+    # Consideramos o dispositivo online se deu sinal nos ultimos 90 segundos
+    # (o heartbeat do firmware e de 30s).
+    visto_em = datetime.fromisoformat(ultimo["recebido_em"])
+    conectado = (datetime.now() - visto_em).total_seconds() < 90
+
+    torto = bool(ultimo["inclinado_frente"] or ultimo["inclinado_lateral"])
+
+    return {
+        "origem": origem,
+        "nuvem_detalhe": detalhe,
+        "conectado": conectado,
+        "dispositivo": ultimo["dispositivo"],
+        "postura_ok": not torto,
+        "inclinado_frente": bool(ultimo["inclinado_frente"]),
+        "inclinado_lateral": bool(ultimo["inclinado_lateral"]),
+        "visto_em": ultimo["recebido_em"],
+        "alertas_24h": alertas["total"],
+        "tempo_ruim_24h_min": round(alertas["segundos"] / 60, 1),
+        "eventos_na_nuvem": total_nuvem,
+        "pendentes_envio": contar_pendentes(),
+        "eventos": recentes,
+    }
+
+
+def status_da_nuvem():
+    """Monta o estado do dashboard com dados lidos do Supabase.
+
+    Todas as consultas rodam no Postgres da nuvem: a soma das ultimas 24h vem
+    da view estatisticas_24h, nao de um SUM feito aqui.
+    """
+    total = nuvem.total_de_linhas()
+    ultimo = nuvem.ultimo_evento()
+
+    if ultimo is None:
+        return vazio("nuvem", "tabela na nuvem ainda vazia")
+
+    estatisticas = nuvem.estatisticas_24h()
+
+    recentes = [
+        dict(linha, recebido_em=nuvem.sem_fuso(linha["recebido_em"]))
+        for linha in nuvem.eventos_recentes()
+    ]
+
+    return montar_resposta(
+        "nuvem",
+        dict(ultimo, recebido_em=nuvem.sem_fuso(ultimo["recebido_em"])),
+        {"total": estatisticas["alertas"], "segundos": estatisticas["segundos"]},
+        recentes,
+        total,
+    )
+
+
+def status_local(detalhe=None):
+    """Mesmo estado, porem lido do SQLite.
+
+    Usado quando a nuvem nao esta configurada ou nao responde. O dashboard
+    mostra de onde veio o dado, para a diferenca ficar visivel na tela.
+    """
     limite = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
 
-    with conectar() as conexao:
+    with closing(conectar()) as conexao:
         ultimo = conexao.execute(
             "SELECT * FROM eventos ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -133,32 +387,70 @@ def status():
         ).fetchall()
 
     if ultimo is None:
-        return jsonify({
-            "conectado": False,
-            "postura_ok": None,
-            "alertas_24h": 0,
-            "tempo_ruim_24h_min": 0,
-            "eventos": [],
-        })
+        return vazio("local", detalhe)
 
-    # Consideramos o dispositivo online se deu sinal nos ultimos 90 segundos
-    # (o heartbeat do firmware e de 30s).
-    visto_em = datetime.fromisoformat(ultimo["recebido_em"])
-    conectado = (datetime.now() - visto_em).total_seconds() < 90
+    return montar_resposta(
+        "local",
+        ultimo,
+        alertas,
+        [dict(linha) for linha in recentes],
+        0,
+        detalhe,
+    )
 
-    torto = bool(ultimo["inclinado_frente"] or ultimo["inclinado_lateral"])
+
+@app.get("/api/status")
+def status():
+    """Estado atual e estatisticas das ultimas 24 horas.
+
+    Le da nuvem. Se a nuvem nao responder, cai para o banco local e diz isso no
+    campo "origem" -- o dashboard mostra a diferenca em vez de fingir que esta
+    tudo bem.
+    """
+    with _trava_cache:
+        if _cache["payload"] and time.monotonic() - _cache["quando"] < CACHE_STATUS_S:
+            return jsonify(_cache["payload"])
+
+    if not nuvem.configurada():
+        payload = status_local("nuvem nao configurada (servidor/.env)")
+    else:
+        try:
+            payload = status_da_nuvem()
+        except requests.RequestException as erro:
+            print(f"[nuvem] leitura falhou, usando banco local: {erro}")
+            payload = status_local(f"nuvem inacessivel: {erro}")
+
+    with _trava_cache:
+        _cache["quando"] = time.monotonic()
+        _cache["payload"] = payload
+
+    return jsonify(payload)
+
+
+@app.get("/api/nuvem")
+def diagnostico_nuvem():
+    """Diagnostico da integracao com a nuvem.
+
+    Serve para conferir a configuracao sem abrir o dashboard, e e uma das
+    evidencias da entrega: mostra o projeto Supabase respondendo, quantas
+    linhas existem na tabela e quantas ainda estao na fila local.
+    """
+    ok, mensagem = nuvem.testar_conexao()
 
     return jsonify({
-        "conectado": conectado,
-        "dispositivo": ultimo["dispositivo"],
-        "postura_ok": not torto,
-        "inclinado_frente": bool(ultimo["inclinado_frente"]),
-        "inclinado_lateral": bool(ultimo["inclinado_lateral"]),
-        "visto_em": ultimo["recebido_em"],
-        "alertas_24h": alertas["total"],
-        "tempo_ruim_24h_min": round(alertas["segundos"] / 60, 1),
-        "eventos": [dict(linha) for linha in recentes],
-    })
+        "servico": "Supabase (PostgreSQL gerenciado)",
+        "comunicacao": "HTTPS / REST (PostgREST)",
+        "projeto_url": nuvem.url_base() or None,
+        "tabela": nuvem.TABELA,
+        "configurada": nuvem.configurada(),
+        "conexao_ok": ok,
+        "mensagem": mensagem,
+        "eventos_na_nuvem": nuvem.total_de_linhas() if ok else 0,
+        "pendentes_envio": contar_pendentes(),
+        "ultimo_envio": estado_nuvem["ultimo_envio"],
+        "ultimo_erro": estado_nuvem["ultimo_erro"],
+        "enviados_na_sessao": estado_nuvem["enviados_na_sessao"],
+    }), (200 if ok else 503)
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +467,12 @@ PAGINA = """<!doctype html>
   body { font-family: system-ui, sans-serif; background: #12151c; color: #e8eaf0;
          margin: 0; padding: 24px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
-  .sub { color: #8b93a7; font-size: 13px; margin-bottom: 24px; }
+  .sub { color: #8b93a7; font-size: 13px; margin-bottom: 16px; }
+  .fonte { display: inline-flex; align-items: center; gap: 8px; font-size: 13px;
+           background: #1a1f2b; border: 1px solid #2a3040; border-radius: 999px;
+           padding: 6px 14px; margin-bottom: 24px; }
+  .bolinha { width: 8px; height: 8px; border-radius: 50%; background: #8b93a7; }
+  .bolinha.nuvem { background: #4ade80; } .bolinha.local { background: #fbbf24; }
   .cartoes { display: grid; gap: 12px;
              grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
              margin-bottom: 24px; }
@@ -183,7 +480,9 @@ PAGINA = """<!doctype html>
   .rotulo { color: #8b93a7; font-size: 12px; text-transform: uppercase;
             letter-spacing: .5px; }
   .valor { font-size: 26px; font-weight: 600; margin-top: 6px; }
+  .nota { color: #8b93a7; font-size: 11px; margin-top: 4px; min-height: 14px; }
   .ok { color: #4ade80; } .ruim { color: #f87171; } .off { color: #8b93a7; }
+  .alerta { color: #fbbf24; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th { text-align: left; color: #8b93a7; font-weight: 500; padding: 8px;
        border-bottom: 1px solid #2a3040; font-size: 12px; text-transform: uppercase; }
@@ -195,22 +494,36 @@ PAGINA = """<!doctype html>
   <h1>Monitor de Postura</h1>
   <div class="sub">Projeto de extensao &middot; ESP32 + sensores SW-520D</div>
 
+  <div class="fonte">
+    <span class="bolinha" id="bolinha"></span>
+    <span id="fonte">Verificando a origem dos dados...</span>
+  </div>
+
   <div class="cartoes">
     <div class="cartao">
       <div class="rotulo">Dispositivo</div>
       <div class="valor" id="conexao">--</div>
+      <div class="nota" id="visto"></div>
     </div>
     <div class="cartao">
       <div class="rotulo">Postura agora</div>
       <div class="valor" id="postura">--</div>
+      <div class="nota" id="eixo_atual"></div>
     </div>
     <div class="cartao">
       <div class="rotulo">Alertas (24h)</div>
       <div class="valor" id="alertas">--</div>
+      <div class="nota" id="onde_somou">--</div>
     </div>
     <div class="cartao">
       <div class="rotulo">Tempo torto (24h)</div>
       <div class="valor" id="tempo">--</div>
+      <div class="nota">soma das duracoes</div>
+    </div>
+    <div class="cartao">
+      <div class="rotulo">Eventos na nuvem</div>
+      <div class="valor" id="nanuvem">--</div>
+      <div class="nota" id="fila"></div>
     </div>
   </div>
 
@@ -231,26 +544,65 @@ function eixo(e) {
   return "--";
 }
 
+// Deixa explicito na tela de onde vem cada numero mostrado: da nuvem ou do
+// banco local. E o jeito mais honesto de apresentar o fallback.
+function mostrarFonte(d) {
+  const bolinha = document.getElementById("bolinha");
+  const texto = document.getElementById("fonte");
+
+  const onde = document.getElementById("onde_somou");
+
+  if (d.origem === "nuvem") {
+    bolinha.className = "bolinha nuvem";
+    texto.textContent = "Dados lidos da nuvem \\u2014 Supabase / PostgreSQL via HTTPS";
+    onde.textContent = "somado no Postgres, na nuvem";
+  } else {
+    bolinha.className = "bolinha local";
+    texto.textContent = "Dados do banco local \\u2014 " + (d.nuvem_detalhe || "nuvem indisponivel");
+    onde.textContent = "somado no SQLite local";
+  }
+}
+
 async function atualizar() {
   try {
     const r = await fetch("/api/status");
     const d = await r.json();
 
+    mostrarFonte(d);
+
     const conexao = document.getElementById("conexao");
     conexao.textContent = d.conectado ? "Online" : "Offline";
     conexao.className = "valor " + (d.conectado ? "ok" : "off");
+    document.getElementById("visto").textContent =
+      d.visto_em ? "visto em " + d.visto_em.replace("T", " ") : "";
 
     const postura = document.getElementById("postura");
     if (!d.conectado || d.postura_ok === null) {
       postura.textContent = "--";
       postura.className = "valor off";
+      document.getElementById("eixo_atual").textContent = "";
     } else {
       postura.textContent = d.postura_ok ? "Correta" : "Inadequada";
       postura.className = "valor " + (d.postura_ok ? "ok" : "ruim");
+      document.getElementById("eixo_atual").textContent =
+        d.postura_ok ? "" : "eixo: " + eixo(d);
     }
 
     document.getElementById("alertas").textContent = d.alertas_24h;
     document.getElementById("tempo").textContent = d.tempo_ruim_24h_min + " min";
+
+    const nanuvem = document.getElementById("nanuvem");
+    nanuvem.textContent = d.origem === "nuvem" ? d.eventos_na_nuvem : "--";
+    nanuvem.className = "valor " + (d.origem === "nuvem" ? "ok" : "off");
+
+    const fila = document.getElementById("fila");
+    if (d.pendentes_envio > 0) {
+      fila.textContent = d.pendentes_envio + " na fila de envio";
+      fila.className = "nota alerta";
+    } else {
+      fila.textContent = "fila local vazia";
+      fila.className = "nota";
+    }
 
     const corpo = document.getElementById("corpo");
     if (!d.eventos.length) {
@@ -283,8 +635,21 @@ def dashboard():
 
 
 if __name__ == "__main__":
+    nuvem.carregar_env()
     criar_tabelas()
-    print(f"Banco de dados: {BANCO}")
+
+    print(f"Banco local (fila): {BANCO}")
+
+    if nuvem.configurada():
+        ok, mensagem = nuvem.testar_conexao()
+        print(f"Nuvem: {nuvem.url_base()}")
+        print(f"       {'OK' if ok else 'FALHA'} -- {mensagem}")
+        if not ok:
+            print("       O servidor sobe de qualquer jeito: os eventos ficam na")
+            print("       fila local e sobem quando a nuvem responder.")
+
+    iniciar_sincronizacao()
+
     print("Dashboard: http://localhost:5000")
     # host 0.0.0.0 e obrigatorio para o ESP32 conseguir alcancar o servidor.
     app.run(host="0.0.0.0", port=5000, debug=False)
