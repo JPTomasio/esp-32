@@ -449,8 +449,11 @@ echo "  conferido: a chave nao aparece em nenhum arquivo da pasta"
 # Resumo
 # ---------------------------------------------------------------------------
 
-REGISTROS=$(grep -oP '\(\K\d+(?= registros gravados)' "$SAIDA/09_banco_local.log" | head -1)
-NA_NUVEM=$(grep -oE 'items 0-[0-9]+/[0-9]+' "$SAIDA/10_nuvem_supabase.log" | grep -oE '[0-9]+$' | head -1)
+# "|| true": com set -e + pipefail, um grep sem resultado (ex.: nuvem pulada)
+# encerrava o script em silencio antes de gerar o RESUMO.md.
+REGISTROS=$(grep -oP '\(\K\d+(?= registros gravados)' "$SAIDA/09_banco_local.log" | head -1 || true)
+# O Supabase devolve "content-range: 0-N/TOTAL", sem o prefixo "items".
+NA_NUVEM=$(grep -ioE '^content-range: [0-9]+-[0-9]+/[0-9]+' "$SAIDA/10_nuvem_supabase.log" | grep -oE '[0-9]+$' | head -1 || true)
 
 cat > "$SAIDA/RESUMO.md" <<RESUMO
 # Evidencias de funcionamento -- Monitor de Postura

@@ -57,8 +57,10 @@ def main():
 
         # A cada ciclo, 40% de chance de a "pessoa" torcer a postura.
         if random.random() < 0.4:
-            frente = random.choice([True, False])
-            lateral = not frente if random.random() < 0.3 else False
+            # Todo alerta tem ao menos um eixo inclinado, como no firmware real.
+            frente, lateral = random.choice(
+                [(True, False), (True, False), (False, True), (True, True)]
+            )
             duracao = random.randint(6, 45)
             alertas += 1
 

@@ -90,9 +90,13 @@ ESTILO = """
     @top-right { content: none; }
 }
 
+/* O titulo (h1) do documento vira o cabecalho corrido, entao cada
+   documento em docs/ sai com o proprio nome no topo das paginas. */
+h1 { string-set: titulo content(); }
+
 @page {
     @top-right {
-        content: "Entrega 4 \\2014  Monitor de Postura";
+        content: string(titulo);
         font-family: Lato, sans-serif;
         font-size: 8pt;
         color: #8a8f98;
