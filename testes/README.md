@@ -47,4 +47,28 @@ aparecem quando algo dá errado:
 - **nuvem de volta** — o pendente sobe sozinho, nada se perde;
 - **reenvio do mesmo evento** — o upsert atualiza a linha em vez de duplicar.
 
-Os três retornam código de saída 0 quando passam.
+## Aviso no celular
+
+Testa o caminho até o Telegram **sem precisar de internet nem de um bot**. O
+teste sobe um servidor HTTP local que imita a Bot API e aponta o
+`TELEGRAM_API_URL` para ele.
+
+```bash
+python testes/teste_notificacao.py
+```
+
+Precisa do `flask` e do `requests` instalados (`servidor/requirements.txt`).
+
+Mostra no log o texto exato que chega no celular e verifica cinco
+comportamentos que decidem se a notificação é útil ou vira incômodo:
+
+- **só alerta notifica** — correção de postura e heartbeat não viram mensagem;
+- **intervalo mínimo** — dois alertas seguidos viram uma mensagem só;
+- **Telegram fora do ar** — o ESP32 continua recebendo `201`, o evento é
+  gravado e a falha fica registrada no gateway;
+- **recusa com HTTP 200** — a Bot API responde `{"ok": false}` quando o chat
+  está errado ou o bot foi bloqueado, e isso precisa contar como falha;
+- **o token não vaza** — nem para o navegador, nem para o `/api/status`, nem
+  para as mensagens de erro que vão parar no log da entrega.
+
+Os quatro retornam código de saída 0 quando passam.

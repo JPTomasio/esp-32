@@ -1,12 +1,13 @@
 """
-ETAPA 3 + ETAPA 4 - Gateway Python do monitor de postura.
+ETAPA 3 + ETAPA 4 + ETAPA 5 - Gateway Python do monitor de postura.
 
 Recebe os eventos que o ESP32 envia por HTTP na rede local, guarda em um banco
-SQLite e replica cada evento para a nuvem (Supabase / PostgreSQL). O dashboard
-le da nuvem.
+SQLite, replica cada evento para a nuvem (Supabase / PostgreSQL) e avisa o
+celular quando a postura fica ruim. O dashboard le da nuvem.
 
     SW-520D -> ESP32 -> HTTP/JSON -> [ ESTE ARQUIVO ] -> SQLite local (fila)
                                                       -> HTTPS/REST -> Supabase
+                                                      -> HTTPS/REST -> Telegram
                                                                           |
                                                                     dashboard
 
@@ -27,6 +28,7 @@ Descubra o IP com "ip a" (Linux) ou "ipconfig" (Windows).
 """
 
 import os
+import queue
 import sqlite3
 import threading
 import time
@@ -37,6 +39,7 @@ from pathlib import Path
 import requests
 from flask import Flask, jsonify, request
 
+import notifica
 import nuvem
 
 app = Flask(__name__)
@@ -58,6 +61,22 @@ LOTE_SINCRONIA = 50
 # O dashboard consulta /api/status a cada 2s. Sem este cache, cada aba aberta
 # viraria varias chamadas por segundo para a nuvem sem necessidade.
 CACHE_STATUS_S = 2.0
+
+# Intervalo minimo entre dois avisos no celular. O firmware manda um alerta por
+# episodio de postura ruim, mas quem esta com a cinta pode entortar e endireitar
+# varias vezes em poucos minutos -- sem esse respiro o celular viraria uma
+# metralhadora e a pessoa desligaria a notificacao no primeiro dia de uso.
+INTERVALO_NOTIFICACAO_PADRAO_S = 120
+
+
+def intervalo_notificacao_s():
+    """Lido a cada uso, e nao uma vez na importacao.
+
+    O servidor/.env so e carregado no fim deste arquivo, depois que o modulo ja
+    foi importado -- uma constante daria o valor padrao para sempre e o ajuste
+    feito no .env nao teria efeito nenhum.
+    """
+    return float(os.environ.get("INTERVALO_NOTIFICACAO_S") or INTERVALO_NOTIFICACAO_PADRAO_S)
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +252,111 @@ def iniciar_sincronizacao():
 
 
 # ---------------------------------------------------------------------------
+# Notificacao no celular (Etapa 5)
+# ---------------------------------------------------------------------------
+
+# Fila curta de proposito: se o Telegram estiver fora do ar, o que importa e o
+# alerta mais recente, nao uma pilha de avisos atrasados chegando todos juntos
+# quando a conexao voltar. Diferente dos eventos, que nunca podem se perder
+# (por isso a fila deles e o SQLite), um aviso atrasado nao serve para nada.
+fila_notificacoes = queue.Queue(maxsize=10)
+
+# Ultimo resultado do envio, exposto em /api/notificacao e no dashboard.
+estado_notificacao = {
+    "ligada": False,
+    "ok": None,              # None = ainda nao tentou
+    "ultimo_envio": None,
+    "ultimo_erro": None,
+    "enviadas_na_sessao": 0,
+    "ignoradas_por_intervalo": 0,
+}
+
+_ultimo_aviso = 0.0
+_trava_aviso = threading.Lock()
+
+
+def pode_avisar():
+    """True quando ja passou o intervalo minimo desde o ultimo aviso.
+
+    Marca o horario na mesma travada em que consulta, para dois eventos que
+    chegarem juntos nao passarem os dois pela verificacao.
+    """
+    global _ultimo_aviso
+
+    with _trava_aviso:
+        agora = time.monotonic()
+
+        if _ultimo_aviso and agora - _ultimo_aviso < intervalo_notificacao_s():
+            return False
+
+        _ultimo_aviso = agora
+        return True
+
+
+def notificar(evento):
+    """Enfileira o aviso para o celular. Nunca bloqueia nem levanta excecao.
+
+    Chamada de dentro do POST /api/eventos, com o ESP32 esperando a resposta:
+    aqui so entra o que e instantaneo. O POST para o Telegram acontece na
+    thread de baixo, pelo mesmo motivo que o envio para a nuvem: o firmware
+    tem timeout curto e nao pode ficar preso esperando a internet.
+    """
+    if not estado_notificacao["ligada"]:
+        return False
+
+    if not pode_avisar():
+        estado_notificacao["ignoradas_por_intervalo"] += 1
+        print("  >> aviso no celular pulado (intervalo minimo entre mensagens)")
+        return False
+
+    try:
+        fila_notificacoes.put_nowait(evento)
+    except queue.Full:
+        print("  >> aviso no celular descartado (fila cheia)")
+        return False
+
+    return True
+
+
+def laco_notificacoes():
+    """Roda em segundo plano durante toda a vida do servidor."""
+    while True:
+        evento = fila_notificacoes.get()
+
+        try:
+            notifica.notificar_alerta(evento)
+        except Exception as erro:              # noqa: BLE001
+            # A thread nunca pode morrer: se ela cair, o projeto para de avisar
+            # o celular em silencio. Um aviso perdido nao e reenviado -- ele ja
+            # estaria atrasado, e o evento em si esta salvo no banco e na nuvem.
+            estado_notificacao["ok"] = False
+            estado_notificacao["ultimo_erro"] = str(erro)
+            print(f"[celular] falha ao avisar: {erro}")
+            continue
+
+        estado_notificacao["ok"] = True
+        estado_notificacao["ultimo_erro"] = None
+        estado_notificacao["ultimo_envio"] = datetime.now().isoformat(timespec="seconds")
+        estado_notificacao["enviadas_na_sessao"] += 1
+
+        print(f"[celular] aviso enviado pelo Telegram ({evento.get('duracao_s')}s torto)")
+
+
+def iniciar_notificacoes():
+    estado_notificacao["ligada"] = notifica.configurada()
+
+    if not notifica.configurada():
+        print("[celular] TELEGRAM_TOKEN/TELEGRAM_CHAT_ID nao configurados em servidor/.env")
+        print("[celular] o sistema roda igual, so nao avisa o celular")
+        return
+
+    thread = threading.Thread(target=laco_notificacoes, daemon=True)
+    thread.start()
+    print("[celular] avisos pelo Telegram ligados "
+          f"(no maximo um a cada {intervalo_notificacao_s():.0f}s)")
+
+
+# ---------------------------------------------------------------------------
 # API que o ESP32 chama
 # ---------------------------------------------------------------------------
 
@@ -268,10 +392,19 @@ def receber_evento():
 
     print(f"[{evento[7]}] {evento[0]} -> {evento[1]} (duracao={evento[4]}s) id={id_local}")
 
-    # Aqui entra a notificacao para o celular (Telegram/WhatsApp), quando o
-    # grupo chegar nessa parte.
+    # Alerta e o unico tipo que vira aviso no celular: "postura_corrigida" e
+    # boa noticia e "status" e o heartbeat de 30s do firmware -- notificar os
+    # dois so ensinaria a pessoa a ignorar as mensagens.
     if dados.get("tipo") == "alerta_postura":
         print("  >> ALERTA: usuario com postura inadequada")
+        notificar({
+            "dispositivo": evento[0],
+            "inclinado_frente": bool(evento[2]),
+            "inclinado_lateral": bool(evento[3]),
+            "duracao_s": evento[4],
+            "total_alertas": evento[5],
+            "recebido_em": evento[7],
+        })
 
     # Avisa a thread de sincronizacao. Responde ao ESP32 sem esperar a nuvem:
     # o firmware tem timeout curto e nao pode ficar preso esperando a internet.
@@ -399,6 +532,15 @@ def status_local(detalhe=None):
     )
 
 
+def resumo_notificacao():
+    """O pouco que o dashboard precisa saber sobre os avisos no celular."""
+    return {
+        "ligada": estado_notificacao["ligada"],
+        "ok": estado_notificacao["ok"],
+        "enviadas": estado_notificacao["enviadas_na_sessao"],
+    }
+
+
 @app.get("/api/status")
 def status():
     """Estado atual e estatisticas das ultimas 24 horas.
@@ -419,6 +561,10 @@ def status():
         except requests.RequestException as erro:
             print(f"[nuvem] leitura falhou, usando banco local: {erro}")
             payload = status_local(f"nuvem inacessivel: {erro}")
+
+    # Fora do montar_resposta de proposito: o estado dos avisos nao vem do
+    # banco nem da nuvem, e vale igual nos dois caminhos (nuvem e local).
+    payload["notificacao"] = resumo_notificacao()
 
     with _trava_cache:
         _cache["quando"] = time.monotonic()
@@ -450,6 +596,32 @@ def diagnostico_nuvem():
         "ultimo_envio": estado_nuvem["ultimo_envio"],
         "ultimo_erro": estado_nuvem["ultimo_erro"],
         "enviados_na_sessao": estado_nuvem["enviados_na_sessao"],
+    }), (200 if ok else 503)
+
+
+@app.get("/api/notificacao")
+def diagnostico_notificacao():
+    """Diagnostico do aviso no celular.
+
+    Nao devolve o token nem o chat de destino: o token e credencial e o chat
+    identifica a pessoa que recebe as mensagens. A resposta e evidencia da
+    entrega, e vai parar em arquivo de log.
+    """
+    ok, mensagem = notifica.testar_conexao()
+
+    return jsonify({
+        "servico": "Telegram (Bot API)",
+        "comunicacao": "HTTPS / REST",
+        "configurada": notifica.configurada(),
+        "conexao_ok": ok,
+        "mensagem": mensagem,
+        "avisos_ligados": estado_notificacao["ligada"],
+        "intervalo_minimo_s": intervalo_notificacao_s(),
+        "enviadas_na_sessao": estado_notificacao["enviadas_na_sessao"],
+        "ignoradas_por_intervalo": estado_notificacao["ignoradas_por_intervalo"],
+        "na_fila": fila_notificacoes.qsize(),
+        "ultimo_envio": estado_notificacao["ultimo_envio"],
+        "ultimo_erro": estado_notificacao["ultimo_erro"],
     }), (200 if ok else 503)
 
 
@@ -524,6 +696,11 @@ PAGINA = """<!doctype html>
       <div class="rotulo">Eventos na nuvem</div>
       <div class="valor" id="nanuvem">--</div>
       <div class="nota" id="fila"></div>
+    </div>
+    <div class="cartao">
+      <div class="rotulo">Avisos no celular</div>
+      <div class="valor" id="avisos">--</div>
+      <div class="nota" id="avisos_nota"></div>
     </div>
   </div>
 
@@ -604,6 +781,20 @@ async function atualizar() {
       fila.className = "nota";
     }
 
+    const avisos = document.getElementById("avisos");
+    const avisosNota = document.getElementById("avisos_nota");
+    const n = d.notificacao || {};
+    if (!n.ligada) {
+      avisos.textContent = "--";
+      avisos.className = "valor off";
+      avisosNota.textContent = "Telegram nao configurado";
+    } else {
+      avisos.textContent = n.enviadas;
+      avisos.className = "valor " + (n.ok === false ? "ruim" : "ok");
+      avisosNota.textContent =
+        n.ok === false ? "falha no ultimo envio" : "enviados por Telegram";
+    }
+
     const corpo = document.getElementById("corpo");
     if (!d.eventos.length) {
       corpo.innerHTML = '<tr><td colspan="4" class="vazio">Nenhum evento ainda.</td></tr>';
@@ -648,7 +839,12 @@ if __name__ == "__main__":
             print("       O servidor sobe de qualquer jeito: os eventos ficam na")
             print("       fila local e sobem quando a nuvem responder.")
 
+    if notifica.configurada():
+        ok, mensagem = notifica.testar_conexao()
+        print(f"Celular: Telegram -- {'OK' if ok else 'FALHA'} -- {mensagem}")
+
     iniciar_sincronizacao()
+    iniciar_notificacoes()
 
     print("Dashboard: http://localhost:5000")
     # host 0.0.0.0 e obrigatorio para o ESP32 conseguir alcancar o servidor.

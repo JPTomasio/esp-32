@@ -8,9 +8,10 @@
 # entao o conteudo sempre corresponde a mesma rodada.
 #
 # O que fica provado aqui: a logica do firmware, o contrato HTTP que o ESP32
-# usa, a gravacao no banco local, o envio para a nuvem (Supabase) e o dashboard
-# reagindo aos dados. O que NAO fica provado: os sensores fisicos e o buzzer --
-# isso depende do hardware montado e esta descrito no final do RESUMO.md gerado.
+# usa, a gravacao no banco local, o envio para a nuvem (Supabase), o aviso no
+# celular (Telegram) e o dashboard reagindo aos dados. O que NAO fica provado:
+# os sensores fisicos e o buzzer -- isso depende do hardware montado e esta
+# descrito no final do RESUMO.md gerado.
 #
 # Se servidor/.env estiver preenchido, o script tambem grava eventos no Supabase
 # de verdade e consulta a nuvem com curl para provar que os dados chegaram la.
@@ -66,19 +67,30 @@ remover_cores() {
   sed -i 's/\x1b\[[0-9;]*m//g' "$@"
 }
 
-# A chave do Supabase (service_role) da acesso total ao banco na nuvem. Ela
-# nunca pode acabar num arquivo entregue ou versionado, entao a apagamos dos
-# logs antes de fechar. A URL do projeto fica: ela e a evidencia de qual
-# projeto na nuvem recebeu os dados, e sozinha nao da acesso a nada.
+# Dois segredos nunca podem acabar num arquivo entregue ou versionado: a chave
+# service_role do Supabase, que da acesso total ao banco na nuvem, e o token do
+# bot do Telegram, que da controle do bot -- e que ainda por cima viaja dentro
+# da URL da API, entao apareceria em qualquer mensagem de erro. Os dois sao
+# apagados dos logs antes de fechar. A URL do projeto Supabase fica: ela e a
+# evidencia de qual projeto recebeu os dados, e sozinha nao da acesso a nada.
+segredos() {
+  [ -n "${SUPABASE_KEY:-}" ] && echo "$SUPABASE_KEY"
+  [ -n "${TELEGRAM_TOKEN:-}" ] && echo "$TELEGRAM_TOKEN"
+  return 0
+}
+
 ocultar_chaves() {
-  [ -z "${SUPABASE_KEY:-}" ] && return 0
-  # A chave e um JWT com pontos e barras, que confundiriam o sed; por isso a
-  # substituicao e feita em Python, com comparacao literal.
-  "$PYTHON" - "$SUPABASE_KEY" "$@" <<'PY'
+  local lista
+  lista="$(segredos)"
+  [ -z "$lista" ] && return 0
+  # Os segredos tem pontos, barras e dois-pontos, que confundiriam o sed; por
+  # isso a substituicao e feita em Python, com comparacao literal.
+  "$PYTHON" - "$lista" "$@" <<'PY'
 import sys
 from pathlib import Path
 
-chave, *arquivos = sys.argv[1:]
+lista, *arquivos = sys.argv[1:]
+segredos = [s for s in lista.splitlines() if s]
 
 for nome in arquivos:
     caminho = Path(nome)
@@ -86,8 +98,11 @@ for nome in arquivos:
         texto = caminho.read_text(encoding="utf-8", errors="replace")
     except OSError:
         continue
-    if chave and chave in texto:
-        caminho.write_text(texto.replace(chave, "[chave-omitida]"), encoding="utf-8")
+    novo = texto
+    for segredo in segredos:
+        novo = novo.replace(segredo, "[chave-omitida]")
+    if novo != texto:
+        caminho.write_text(novo, encoding="utf-8")
 PY
 }
 
@@ -108,20 +123,29 @@ for c in google-chrome google-chrome-stable chromium chromium-browser; do
   command -v "$c" >/dev/null && { CHROME="$c"; break; }
 done
 
-# Le servidor/.env para saber se a nuvem esta configurada. Somente as duas
-# variaveis do Supabase sao aproveitadas -- nao usamos "source" para nao
-# executar o que estiver escrito no arquivo.
+# Le servidor/.env para saber o que esta configurado. Somente as variaveis
+# conhecidas sao aproveitadas -- nao usamos "source" para nao executar o que
+# estiver escrito no arquivo.
 ENV_NUVEM="$RAIZ/servidor/.env"
-SUPABASE_URL=""
-SUPABASE_KEY=""
-if [ -f "$ENV_NUVEM" ]; then
-  SUPABASE_URL="$(grep -E '^SUPABASE_URL=' "$ENV_NUVEM" | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r' || true)"
-  SUPABASE_KEY="$(grep -E '^SUPABASE_KEY=' "$ENV_NUVEM" | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r' || true)"
-fi
+ler_env() {
+  [ -f "$ENV_NUVEM" ] || return 0
+  grep -E "^$1=" "$ENV_NUVEM" | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r' || true
+}
+
+SUPABASE_URL="$(ler_env SUPABASE_URL)"
+SUPABASE_KEY="$(ler_env SUPABASE_KEY)"
+# O token do bot nao e exportado: quem precisa dele e o app.py, que le o .env
+# sozinho. Aqui ele serve para saber se a etapa 10 pode enviar mensagem de
+# verdade e, principalmente, para apagar o token dos logs no final.
+TELEGRAM_TOKEN="$(ler_env TELEGRAM_TOKEN)"
+TELEGRAM_CHAT_ID="$(ler_env TELEGRAM_CHAT_ID)"
 export SUPABASE_URL SUPABASE_KEY
 
 NUVEM_ATIVA=false
 [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_KEY" ] && NUVEM_ATIVA=true
+
+CELULAR_ATIVO=false
+[ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && CELULAR_ATIVO=true
 
 rm -rf "$SAIDA"
 mkdir -p "$SAIDA"
@@ -135,12 +159,18 @@ else
   echo "Nuvem: NAO configurada -- crie servidor/.env a partir de .env.exemplo"
   echo "       As etapas 9 e 10 (dados na nuvem) serao puladas."
 fi
+if $CELULAR_ATIVO; then
+  echo "Celular: bot do Telegram configurado -- as mensagens sao enviadas de verdade"
+else
+  echo "Celular: bot do Telegram NAO configurado -- a etapa 10 roda apenas o teste"
+  echo "         automatizado, contra um Telegram simulado."
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Logica do firmware (compila o .ino de verdade com mocks do Arduino)
 # ---------------------------------------------------------------------------
 
-titulo "1/9 Teste da logica do firmware"
+titulo "1/10 Teste da logica do firmware"
 {
   echo "# Teste da logica do firmware -- $(date '+%Y-%m-%d %H:%M:%S')"
   echo "# Compila firmware/02_monitor_postura/02_monitor_postura.ino sem alteracoes,"
@@ -162,7 +192,7 @@ rm -f "$SAIDA/.teste_firmware"
 # 2. Consultas do servidor
 # ---------------------------------------------------------------------------
 
-titulo "2/9 Teste das consultas do servidor"
+titulo "2/10 Teste das consultas do servidor"
 {
   echo "# Teste do esquema e das agregacoes do dashboard -- $(date '+%Y-%m-%d %H:%M:%S')"
   echo
@@ -176,7 +206,7 @@ titulo "2/9 Teste das consultas do servidor"
 # 3. Integracao com a nuvem, testada sem internet
 # ---------------------------------------------------------------------------
 
-titulo "3/9 Teste da integracao com a nuvem"
+titulo "3/10 Teste da integracao com a nuvem"
 {
   echo "# Teste da integracao com a nuvem -- $(date '+%Y-%m-%d %H:%M:%S')"
   echo "# Sobe um PostgREST de mentira em 127.0.0.1 e aponta o SUPABASE_URL para"
@@ -195,7 +225,7 @@ titulo "3/9 Teste da integracao com a nuvem"
 # 4. Sobe o gateway (banco separado, para nao mexer no postura.db do grupo)
 # ---------------------------------------------------------------------------
 
-titulo "4/9 Gateway Flask"
+titulo "4/10 Gateway Flask"
 POSTURA_DB="$BANCO" "$PYTHON" -u "$RAIZ/servidor/app.py" > "$SAIDA/04_servidor.log" 2>&1 &
 SERVIDOR_PID=$!
 
@@ -212,7 +242,7 @@ $NUVEM_ATIVA && echo "replicando para $SUPABASE_URL"
 # 5. Contrato HTTP -- as mesmas chamadas que o ESP32 faz
 # ---------------------------------------------------------------------------
 
-titulo "5/9 Chamadas da API"
+titulo "5/10 Chamadas da API"
 {
   echo "# Contrato HTTP entre o ESP32 e o gateway Python -- $(date '+%Y-%m-%d %H:%M:%S')"
   echo "# As chamadas abaixo sao identicas as que o firmware faz em enviarEvento()."
@@ -251,7 +281,7 @@ titulo "5/9 Chamadas da API"
 # 6. Simulador
 # ---------------------------------------------------------------------------
 
-titulo "6/9 Simulador de ESP32 por ${SEGUNDOS_SIMULACAO}s"
+titulo "6/10 Simulador de ESP32 por ${SEGUNDOS_SIMULACAO}s"
 # -u desliga o buffer do stdout: sem isso o log fica vazio ao encerrar.
 SIMULADOR_DISPOSITIVO="$DISPOSITIVO" \
   "$PYTHON" -u "$RAIZ/servidor/simulador.py" > "$SAIDA/06_simulador.log" 2>&1 &
@@ -269,7 +299,7 @@ echo "simulador parado; ${ENVIADOS:-0} eventos enviados"
 # 7. Capturas do dashboard
 # ---------------------------------------------------------------------------
 
-titulo "7/9 Capturas do dashboard"
+titulo "7/10 Capturas do dashboard"
 
 # Espera a fila local esvaziar, para o dashboard ser capturado lendo da nuvem
 # e nao caindo para o banco local.
@@ -311,7 +341,7 @@ capturar "$SAIDA/08_dashboard_ok.png"
 # 8. Banco local (a fila)
 # ---------------------------------------------------------------------------
 
-titulo "8/9 Conteudo do banco local"
+titulo "8/10 Conteudo do banco local"
 "$PYTHON" - "$BANCO" > "$SAIDA/09_banco_local.log" <<'PY'
 import sqlite3, sys
 from datetime import datetime
@@ -360,7 +390,7 @@ tail -12 "$SAIDA/09_banco_local.log"
 # 9. Dados na nuvem
 # ---------------------------------------------------------------------------
 
-titulo "9/9 Dados na nuvem (Supabase)"
+titulo "9/10 Dados na nuvem (Supabase)"
 {
   echo "# Evidencia de dados chegando a nuvem -- $(date '+%Y-%m-%d %H:%M:%S')"
   echo "# Dispositivo desta rodada: $DISPOSITIVO"
@@ -425,6 +455,61 @@ titulo "9/9 Dados na nuvem (Supabase)"
   fi
 } | tee "$SAIDA/10_nuvem_supabase.log"
 
+# ---------------------------------------------------------------------------
+# 10. Aviso no celular (Telegram)
+# ---------------------------------------------------------------------------
+
+titulo "10/10 Aviso no celular (Telegram)"
+{
+  echo "# Evidencia do aviso no celular -- $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "# Quando a postura fica ruim, o buzzer avisa quem esta com a cinta. Esta"
+  echo "# etapa prova a outra ponta: a mesma informacao chegando no celular."
+  echo
+
+  echo "--- 10.1 Teste automatizado, contra uma Bot API simulada (roda sem internet)"
+  echo "# Sobe um Telegram de mentira em 127.0.0.1 e aponta o TELEGRAM_API_URL para"
+  echo "# ele. Verifica o texto que sai para o celular, quais eventos viram mensagem,"
+  echo "# o intervalo minimo entre avisos, o comportamento com o Telegram fora do ar"
+  echo "# e que o token nao vaza para o navegador nem para os logs."
+  echo "\$ python testes/teste_notificacao.py"
+  ( cd "$RAIZ" && env -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID -u TELEGRAM_API_URL \
+      -u INTERVALO_NOTIFICACAO_S -u POSTURA_DB -u SUPABASE_URL -u SUPABASE_KEY \
+      "$PYTHON" -u testes/teste_notificacao.py )
+  echo
+  echo "codigo de saida: 0"
+  echo
+
+  if ! $CELULAR_ATIVO; then
+    echo "--- 10.2 PULADO: nao ha bot do Telegram configurado"
+    echo
+    echo "Para gerar tambem a evidencia de mensagem enviada de verdade:"
+    echo "  1. no Telegram, fale com o @BotFather -> /newbot"
+    echo "  2. mande uma mensagem qualquer para o bot recem-criado"
+    echo "  3. pegue o chat id em https://api.telegram.org/bot<token>/getUpdates"
+    echo "  4. preencha TELEGRAM_TOKEN e TELEGRAM_CHAT_ID em servidor/.env"
+    echo "  5. rode este script de novo"
+  else
+    echo "--- 10.2 Envio real, feito durante esta execucao"
+    echo "# O bot estava configurado, entao os alertas das etapas 5 a 7 viraram"
+    echo "# mensagens de verdade no Telegram -- respeitando o intervalo minimo, que"
+    echo "# existe justamente para o celular nao receber uma mensagem por evento."
+    echo "\$ curl $BASE/api/notificacao"
+    curl -s "$BASE/api/notificacao" | "$PYTHON" -m json.tool
+    echo
+    echo "# enviadas_na_sessao maior que zero e a prova do lado do Telegram: a Bot"
+    echo "# API respondeu ok=true para cada mensagem. ignoradas_por_intervalo mostra"
+    echo "# quantos alertas foram segurados para nao encher o celular."
+    echo "# O token do bot e o chat de destino nao aparecem nesta resposta de"
+    echo "# proposito: o primeiro e credencial, o segundo identifica a pessoa."
+    echo
+    echo "--- 10.3 O que o gateway registrou sobre o celular"
+    grep -E '^\[celular\]' "$SAIDA/04_servidor.log" || echo "(nenhuma linha)"
+    echo
+    echo "# Falta o print da conversa no celular: essa parte exige a tela do"
+    echo "# aparelho e esta listada no fim deste RESUMO."
+  fi
+} | tee "$SAIDA/11_notificacao.log"
+
 limpar
 SERVIDOR_PID=""
 
@@ -433,17 +518,20 @@ ocultar_ips_locais "$SAIDA"/*.log
 encurtar_caminhos "$SAIDA"/*.log
 remover_cores "$SAIDA"/*.log
 ocultar_chaves "$SAIDA"/*.log
-echo "  IPs da rede local, caminhos absolutos, cores do terminal e a chave do"
-echo "  Supabase foram removidos dos arquivos .log"
+echo "  IPs da rede local, caminhos absolutos, cores do terminal, a chave do"
+echo "  Supabase e o token do bot foram removidos dos arquivos .log"
 
-# Conferencia final: se a chave ainda aparecer em algum arquivo, aborta em vez
-# de entregar uma pasta com credencial dentro.
-if [ -n "${SUPABASE_KEY:-}" ] && grep -rqF "$SUPABASE_KEY" "$SAIDA" 2>/dev/null; then
-  echo "ERRO: a chave do Supabase ainda aparece em evidencias/saida/." >&2
-  echo "Nao entregue esta pasta. Avise o grupo e abra um issue." >&2
-  exit 1
-fi
-echo "  conferido: a chave nao aparece em nenhum arquivo da pasta"
+# Conferencia final: se algum segredo ainda aparecer, aborta em vez de entregar
+# uma pasta com credencial dentro.
+while IFS= read -r segredo; do
+  [ -z "$segredo" ] && continue
+  if grep -rqF "$segredo" "$SAIDA" 2>/dev/null; then
+    echo "ERRO: uma credencial do servidor/.env ainda aparece em evidencias/saida/." >&2
+    echo "Nao entregue esta pasta. Avise o grupo e abra um issue." >&2
+    exit 1
+  fi
+done <<< "$(segredos)"
+echo "  conferido: nenhuma credencial aparece nos arquivos da pasta"
 
 # ---------------------------------------------------------------------------
 # Resumo
@@ -468,6 +556,7 @@ Gerado automaticamente por \`evidencias/gera_evidencias.sh\`.
 - **Navegador da captura:** $([ -n "$CHROME" ] && $CHROME --version || echo "nao disponivel")
 - **Dispositivo desta rodada:** \`$DISPOSITIVO\`
 - **Nuvem:** $($NUVEM_ATIVA && echo "Supabase -- $SUPABASE_URL" || echo "nao configurada (etapa 9 pulada)")
+- **Aviso no celular:** $($CELULAR_ATIVO && echo "Telegram, mensagens enviadas de verdade nesta rodada" || echo "bot nao configurado (somente o teste automatizado)")
 
 ## Caminho dos dados
 
@@ -475,8 +564,9 @@ Gerado automaticamente por \`evidencias/gera_evidencias.sh\`.
 SW-520D -> ESP32 -> HTTP/JSON (Wi-Fi) -> Python (gateway Flask)
                                            +-> SQLite local (fila de envio)
                                            +-> HTTPS/REST -> Supabase / PostgreSQL
-                                                                   |
-                                                             Dashboard le daqui
+                                           |                       |
+                                           |                 Dashboard le daqui
+                                           +-> HTTPS/REST -> Telegram -> celular
 \`\`\`
 
 ## Arquivos
@@ -493,6 +583,7 @@ SW-520D -> ESP32 -> HTTP/JSON (Wi-Fi) -> Python (gateway Flask)
 | \`08_dashboard_ok.png\` | Dashboard no estado **postura correta** logo apos o evento de correcao: prova que a tela reage a mudanca de estado. |
 | \`09_banco_local.log\` | Esquema criado pelo proprio \`app.py\` e os ${REGISTROS:-todos os} registros da fila local, com a coluna \`enviado_nuvem\` mostrando o que ja subiu para o Supabase. |
 | \`10_nuvem_supabase.log\` | **Evidencia de dados chegando a nuvem.** Consulta feita com \`curl\` direto no PostgREST do Supabase, por fora da nossa aplicacao: as linhas gravadas${NA_NUVEM:+ ($NA_NUVEM desta rodada)}, a contagem feita pelo Postgres, a agregacao rodando na view \`estatisticas_24h\` e a confirmacao de que a tabela nao esta aberta para chave publica (RLS). |
+| \`11_notificacao.log\` | **O aviso chegando no celular.** O teste contra uma Bot API simulada mostra o texto exato da mensagem, prova que so o alerta notifica (correcao e heartbeat nao), que o intervalo minimo segura a enxurrada, que o ESP32 continua recebendo 201 com o Telegram fora do ar e que o token nao vaza. Com o bot configurado, traz tambem o \`/api/notificacao\` com as mensagens realmente aceitas pelo Telegram nesta rodada. |
 | \`postura_evidencia.db\` | O banco SQLite local desta execucao, caso seja preciso conferir os dados na mao. |
 
 ## O que estas evidencias nao cobrem
@@ -510,7 +601,10 @@ Tudo acima roda no PC e na nuvem. Ficam de fora:
 4. **Envio pelo WiFi** -- o log serial do firmware principal mostra a conexao e
    o HTTP 201 de cada envio; junto com \`04_servidor.log\` do lado do PC, fecha o
    caminho completo.
-5. **Angulo-limite escolhido pelo grupo** -- foto da montagem com o angulo
+5. **Print da conversa no celular** -- a tela do Telegram com o aviso que o
+   sistema mandou. O \`11_notificacao.log\` prova o envio pelo lado do servidor;
+   o print mostra a mensagem como a pessoa recebe.
+6. **Angulo-limite escolhido pelo grupo** -- foto da montagem com o angulo
    marcado. O SW-520D nao mede angulo: a calibragem e a posicao em que o sensor
    foi colado, entao a foto e a unica documentacao possivel dela.
 RESUMO

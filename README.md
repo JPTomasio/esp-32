@@ -1,15 +1,16 @@
 # Monitor de Postura — ESP32 + SW-520D
 
 Projeto de extensão. Detecta quando o usuário fica em inclinação inadequada
-por tempo prolongado, alerta com buzzer e registra os eventos na nuvem, com
-dashboard em tempo real.
+por tempo prolongado, alerta com buzzer, avisa no celular e registra os eventos
+na nuvem, com dashboard em tempo real.
 
 ```
 SW-520D  →  ESP32  →  HTTP/JSON (Wi-Fi)  →  Python (gateway Flask)
                                                ├──→ SQLite local  (fila de envio)
-                                               └──→ HTTPS/REST  →  Supabase / PostgreSQL
-                                                                        ↓
-                                                                    Dashboard
+                                               ├──→ HTTPS/REST  →  Supabase / PostgreSQL
+                                               │                        ↓
+                                               │                    Dashboard
+                                               └──→ HTTPS/REST  →  Telegram  →  celular
 ```
 
 O documento da entrega da integração com cloud (`docs/Entrega_4_Resposta.md`)
@@ -175,6 +176,72 @@ continua alertando e os eventos ficam numa fila no SQLite (coluna
 O dashboard mostra sempre de onde vieram os números na tela, em vez de fingir
 que está tudo bem.
 
+### Etapa 5 — aviso no celular (Telegram)
+
+O buzzer avisa quem está usando a cinta. Esta etapa manda a mesma informação
+para o celular, onde ela pode ser vista depois e mostrada para outra pessoa.
+É opcional: sem configurar, o resto do sistema roda igual.
+
+**Por que Telegram e não WhatsApp:** o WhatsApp só permite envio automático
+pela API oficial da Meta, que exige conta comercial verificada, número
+dedicado e mensagens em modelos aprovados antes. Nada disso cabe num projeto
+de extensão. O bot do Telegram sai em dois minutos e o envio é um POST HTTPS,
+exatamente o que o projeto já faz com o Supabase.
+
+**1. Criar o bot**
+
+No Telegram, fale com o **@BotFather** → `/newbot` → escolha um nome. Ele
+responde com o token, algo como `123456789:AAH...`.
+
+**2. Descobrir para quem mandar**
+
+Mande qualquer mensagem para o bot que você acabou de criar — o Telegram não
+deixa um bot escrever primeiro para alguém. Depois abra no navegador,
+trocando `<token>` pelo seu:
+
+```
+https://api.telegram.org/bot<token>/getUpdates
+```
+
+Procure `"chat":{"id":987654321` — esse número é o destino. Para avisar o
+grupo todo, crie um grupo, coloque o bot dentro e use o id do grupo (vem
+negativo, é normal).
+
+**3. Preencher o `.env`**
+
+No mesmo `servidor/.env` do Supabase:
+
+```
+TELEGRAM_TOKEN=123456789:AAH...
+TELEGRAM_CHAT_ID=987654321
+```
+
+O token dá controle total do bot, então ele fica **só no servidor Python**:
+nunca vai para o navegador nem para o firmware. O `.env` está no `.gitignore`.
+
+**4. Rodar**
+
+```bash
+cd servidor && python app.py
+```
+
+O servidor imprime na subida se conseguiu falar com o bot. Para conferir
+depois: <http://localhost:5000/api/notificacao>. O dashboard ganha um cartão
+mostrando quantos avisos já saíram.
+
+Só **alerta de postura** vira mensagem: correção de postura é boa notícia e o
+heartbeat é de 30 em 30 segundos — notificar os dois só ensinaria a pessoa a
+ignorar o aviso. E existe um intervalo mínimo entre mensagens (padrão 120 s,
+ajustável em `INTERVALO_NOTIFICACAO_S`), porque quem está com a cinta entorta
+e endireita várias vezes seguidas.
+
+O envio acontece numa thread separada, pelo mesmo motivo do envio para a
+nuvem: o ESP32 recebe a resposta na hora, sem ficar preso esperando a
+internet. **Se o Telegram estiver fora do ar, o aviso é descartado** — ao
+contrário dos eventos, que ficam na fila do SQLite. Um aviso de postura que
+chega meia hora depois não serve para nada; o evento em si não se perde,
+continua no banco e na nuvem.
+
 ### Descobrir o IP do computador
 
 ```bash
@@ -195,7 +262,9 @@ esp32/
 ├── servidor/
 │   ├── app.py                 gateway Flask + fila SQLite + dashboard
 │   ├── nuvem.py               integração com o Supabase (única parte que
-│   │                          fala com a internet)
+│   │                          fala com a nuvem)
+│   ├── notifica.py            aviso no celular (única parte que fala com o
+│   │                          Telegram)
 │   ├── esquema_supabase.sql   tabela, índices, view e RLS da nuvem
 │   ├── .env.exemplo           modelo das credenciais (o .env não é versionado)
 │   ├── simulador.py           gera eventos falsos para teste
@@ -207,9 +276,9 @@ esp32/
 └── README.md
 ```
 
-Os testes em `testes/` validam a lógica do firmware, as consultas do servidor e
-a integração com a nuvem sem precisar do hardware montado nem de internet. Veja
-`testes/README.md`.
+Os testes em `testes/` validam a lógica do firmware, as consultas do servidor,
+a integração com a nuvem e o aviso no celular sem precisar do hardware montado
+nem de internet. Veja `testes/README.md`.
 
 ## Evidencias de funcionamento
 
@@ -225,15 +294,17 @@ bash evidencias/gera_evidencias.sh
 > Sem o `uv`, um venv comum resolve:
 > `python3 -m venv .venv-evidencias && .venv-evidencias/bin/pip install -r servidor/requirements.txt`
 
-Em cerca de um minuto ele roda os tres testes, sobe o servidor num banco
+Em cerca de um minuto ele roda os quatro testes, sobe o servidor num banco
 separado (nao encosta no `postura.db` do grupo), grava as chamadas HTTP que o
 ESP32 faz, roda o simulador por 45 s, captura o dashboard nos estados de alerta
-e de postura correta, despeja o conteudo do banco local e **consulta o Supabase
-com `curl` para provar que os dados chegaram na nuvem**. Tudo vai para
-`evidencias/saida/`, com um `RESUMO.md` explicando o que cada arquivo prova.
+e de postura correta, despeja o conteudo do banco local, **consulta o Supabase
+com `curl` para provar que os dados chegaram na nuvem** e registra o **aviso
+enviado para o celular**. Tudo vai para `evidencias/saida/`, com um `RESUMO.md`
+explicando o que cada arquivo prova.
 
-Se `servidor/.env` nao estiver configurado, a etapa da nuvem e pulada com uma
-explicacao no log e o resto roda normalmente.
+Se `servidor/.env` nao estiver configurado, as etapas que dependem de internet
+sao puladas com uma explicacao no log e o resto roda normalmente -- inclusive o
+teste da notificacao, que usa um Telegram simulado.
 
 A pasta `evidencias/saida/` **nao e versionada** — o script e regenera em um
 minuto, e a saida inclui um banco binario. Rode o script antes da entrega e
@@ -241,14 +312,15 @@ anexe a pasta, ou gere na hora da apresentacao.
 
 Antes de fechar, o script limpa os logs: IPs da rede local viram
 `[ip-local-omitido]`, caminhos absolutos viram relativos, os codigos de cor do
-Flask sao removidos e **a chave do Supabase e apagada**. Assim a pasta pode ser
-entregue ou versionada sem levar junto o IP da sua maquina, o caminho da sua
-pasta pessoal nem a credencial da nuvem. No final o script confere de novo se a
-chave vazou em algum arquivo e aborta se encontrar.
+Flask sao removidos e **a chave do Supabase e o token do bot sao apagados**.
+Assim a pasta pode ser entregue ou versionada sem levar junto o IP da sua
+maquina, o caminho da sua pasta pessoal nem as credenciais. No final o script
+confere de novo se algum segredo vazou em algum arquivo e aborta se encontrar.
 
-O que o script **nao** cobre: o print do painel do Supabase (exige login) e as
-evidencias que dependem do hardware montado -- log do Monitor Serial, video do
-buzzer disparando e a foto da montagem com o angulo-limite. O `RESUMO.md`
+O que o script **nao** cobre: o print do painel do Supabase (exige login), o
+print da conversa no celular (exige a tela do aparelho) e as evidencias que
+dependem do hardware montado -- log do Monitor Serial, video do buzzer
+disparando e a foto da montagem com o angulo-limite. O `RESUMO.md`
 gerado lista essas pendencias com instrucoes, inclusive o nome do dispositivo
 para filtrar no painel da nuvem.
 
@@ -270,8 +342,6 @@ O Markdown é a fonte: edite o `.md` e gere o PDF de novo, nunca o contrário.
 
 ## O que ainda falta
 
-- Notificação no celular (Telegram/WhatsApp). O ponto de entrada já está
-  marcado em `app.py`, na função `receber_evento`.
 - Alimentação por bateria, para o protótipo não ficar preso ao cabo USB.
 - Definir e documentar o ângulo-limite escolhido pelo grupo, com foto da
   montagem — é a única documentação possível da calibragem, já que o SW-520D
