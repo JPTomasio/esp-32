@@ -231,9 +231,10 @@ mostrando quantos avisos já saíram.
 
 Só **alerta de postura** vira mensagem: correção de postura é boa notícia e o
 heartbeat é de 30 em 30 segundos — notificar os dois só ensinaria a pessoa a
-ignorar o aviso. E existe um intervalo mínimo entre mensagens (padrão 120 s,
+ignorar o aviso. E existe um intervalo mínimo entre mensagens (padrão 60 s,
 ajustável em `INTERVALO_NOTIFICACAO_S`), porque quem está com a cinta entorta
-e endireita várias vezes seguidas.
+e endireita várias vezes seguidas — mas curto o bastante para a pessoa não
+passar muito tempo curvada sem ser lembrada de novo.
 
 O envio acontece numa thread separada, pelo mesmo motivo do envio para a
 nuvem: o ESP32 recebe a resposta na hora, sem ficar preso esperando a

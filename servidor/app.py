@@ -66,7 +66,11 @@ CACHE_STATUS_S = 2.0
 # episodio de postura ruim, mas quem esta com a cinta pode entortar e endireitar
 # varias vezes em poucos minutos -- sem esse respiro o celular viraria uma
 # metralhadora e a pessoa desligaria a notificacao no primeiro dia de uso.
-INTERVALO_NOTIFICACAO_PADRAO_S = 120
+#
+# 60s e o meio termo escolhido pelo grupo: espacado o bastante para nao virar
+# incomodo, curto o bastante para a pessoa nao passar meia hora curvada sem ser
+# lembrada de novo.
+INTERVALO_NOTIFICACAO_PADRAO_S = 60
 
 
 def intervalo_notificacao_s():
