@@ -607,6 +607,11 @@ Tudo acima roda no PC e na nuvem. Ficam de fora:
 6. **Angulo-limite escolhido pelo grupo** -- foto da montagem com o angulo
    marcado. O SW-520D nao mede angulo: a calibragem e a posicao em que o sensor
    foi colado, entao a foto e a unica documentacao possivel dela.
+
+O passo a passo de cada uma dessas capturas -- o que precisa aparecer, em que
+formato e onde guardar -- esta em \`docs/Checklist_Evidencias.md\`, na pasta
+compartilhada do grupo. Nao guarde as capturas dentro de \`evidencias/saida/\`:
+esta pasta e apagada e refeita a cada execucao do script.
 RESUMO
 
 titulo "Pronto"

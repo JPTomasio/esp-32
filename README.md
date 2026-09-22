@@ -323,7 +323,8 @@ print da conversa no celular (exige a tela do aparelho) e as evidencias que
 dependem do hardware montado -- log do Monitor Serial, video do buzzer
 disparando e a foto da montagem com o angulo-limite. O `RESUMO.md`
 gerado lista essas pendencias com instrucoes, inclusive o nome do dispositivo
-para filtrar no painel da nuvem.
+para filtrar no painel da nuvem; o passo a passo de cada captura esta em
+`docs/Checklist_Evidencias.md`, na pasta compartilhada do grupo.
 
 ## Documentos das entregas
 
