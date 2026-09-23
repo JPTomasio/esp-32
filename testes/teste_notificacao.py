@@ -4,7 +4,9 @@ Testa o aviso no celular (Etapa 5) sem precisar de internet nem de um bot.
 O teste sobe um servidor HTTP local que imita a Bot API do Telegram e aponta o
 TELEGRAM_API_URL para ele. Assim conseguimos verificar de verdade:
 
-  - que um alerta de postura vira mensagem no celular, com o texto certo;
+  - que um alerta de postura vira mensagem no celular, num texto que a pessoa
+    entende sem saber nada do sistema (o que esta errado, ha quanto tempo e o
+    que fazer) e sem jargao de manutencao;
   - que correcao de postura e heartbeat NAO viram mensagem;
   - o intervalo minimo entre avisos, que impede a enxurrada de mensagens;
   - que o ESP32 continua recebendo 201 mesmo com o Telegram fora do ar;
@@ -182,11 +184,20 @@ def main():
     texto = enviada["text"]
     print(f"\n    --- mensagem como chega no celular ---\n"
           + "\n".join("    | " + l for l in texto.splitlines()) + "\n")
-    check("assunto da mensagem", texto.splitlines()[0], "ALERTA DE POSTURA")
+    check("assunto da mensagem", texto.splitlines()[0], "Hora de ajustar a postura!")
     check("eixo descrito em portugues", "inclinado para frente" in texto, True)
-    check("tempo na posicao ruim", "Tempo nessa posicao: 12s" in texto, True)
-    check("contagem de alertas do firmware", "Alertas desde que ligou: 3" in texto, True)
-    check("dispositivo identificado", "esp32-teste" in texto, True)
+    check("tempo em palavras, nao em segundos crus", "ha 12 segundos" in texto, True)
+    check("a mensagem diz o que fazer", "Endireite as costas" in texto, True)
+    ultima_linha = texto.splitlines()[-1]
+    check("hora do aviso, sem data nem segundos",
+          ultima_linha.startswith("Aviso das ")
+          and len(ultima_linha) == len("Aviso das 17:06"),
+          True)
+    # O aviso e para a pessoa, nao para quem mantem o sistema: identificador do
+    # dispositivo e contagem de alertas ficam no painel e no banco.
+    check("sem jargao do sistema no celular", "esp32-teste" in texto, False)
+    check("sem contagem de alertas no celular", "Alertas" in texto, False)
+    check("aviso curto", len(texto.splitlines()), 6)
 
     # -----------------------------------------------------------------------
     print("\n2. Correcao de postura e heartbeat nao viram mensagem")

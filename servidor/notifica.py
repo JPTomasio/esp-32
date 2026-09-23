@@ -143,33 +143,81 @@ def enviar(texto):
 # ---------------------------------------------------------------------------
 
 def descrever_eixos(frente, lateral):
+    """Como a pessoa esta torta, nas palavras que ela usaria."""
     if frente and lateral:
         return "inclinado para frente e para o lado"
     if frente:
         return "inclinado para frente"
     if lateral:
         return "inclinado para o lado"
-    return "inclinacao nao informada"
+    return "fora da posicao certa"
+
+
+def descrever_tempo(segundos):
+    """Segundos viram tempo de relogio: "40 segundos", "1 minuto e 30 segundos".
+
+    O firmware conta em segundos porque e assim que ele mede, mas "ha 180
+    segundos" obriga quem le a fazer conta. No celular vale o numero que a
+    pessoa entende sem pensar.
+    """
+    segundos = int(segundos or 0)
+    if segundos < 60:
+        return "1 segundo" if segundos == 1 else f"{segundos} segundos"
+
+    minutos, resto = divmod(segundos, 60)
+    texto = "1 minuto" if minutos == 1 else f"{minutos} minutos"
+    if resto:
+        texto += " e 1 segundo" if resto == 1 else f" e {resto} segundos"
+    return texto
+
+
+def o_que_fazer(frente, lateral):
+    """A unica coisa que o aviso pede da pessoa: o movimento de correcao."""
+    if frente and lateral:
+        return "Endireite as costas e alinhe os ombros."
+    if lateral:
+        return "Alinhe os ombros: o peso esta todo de um lado so."
+    return "Endireite as costas e encoste bem no fundo da cadeira."
+
+
+def hora_curta(quando):
+    """So a hora e o minuto do "2026-09-22T17:06:16" que o app.py carimba.
+
+    Segundos e data completa nao dizem nada para quem esta lendo no celular
+    minutos depois -- o que importa e "foi agora" ou "foi mais cedo".
+    """
+    relogio = str(quando).replace("T", " ").split(" ")[-1]
+    return relogio[:5] if relogio[2:3] == ":" else str(quando)
 
 
 def mensagem(evento):
-    """Monta o texto do aviso a partir do evento que o ESP32 mandou.
+    """Monta o aviso que chega no celular.
+
+    Quem le e a pessoa que esta com a cinta, no meio de outra coisa -- aula,
+    trabalho, estudo. Entao o texto responde so as tres perguntas dela: o que
+    esta errado, ha quanto tempo, o que fazer agora -- e a hora, porque o aviso
+    pode ser lido bem depois de chegar. Nome do dispositivo e contagem de
+    alertas saem daqui de proposito: isso e informacao de manutencao do
+    sistema, e continua inteira no painel, no banco local e na nuvem, que e
+    onde ela serve para alguma coisa.
 
     Sem acento e sem emoji, pelo mesmo motivo do resto do projeto: o texto
     passa por log, terminal e arquivo de evidencia antes de chegar no celular.
     """
+    frente = evento.get("inclinado_frente")
+    lateral = evento.get("inclinado_lateral")
+    # Sem "recebido_em" o aviso nao veio pelo caminho normal (app.py sempre
+    # carimba): a hora do envio e a melhor aproximacao que sobra.
     quando = evento.get("recebido_em") or datetime.now().isoformat(timespec="seconds")
-    duracao = evento.get("duracao_s") or 0
 
     return "\n".join([
-        "ALERTA DE POSTURA",
+        "Hora de ajustar a postura!",
         "",
-        f"Situacao: {descrever_eixos(evento.get('inclinado_frente'), evento.get('inclinado_lateral'))}",
-        f"Tempo nessa posicao: {duracao}s",
-        f"Alertas desde que ligou: {evento.get('total_alertas') or 0}",
+        f"Voce esta {descrever_eixos(frente, lateral)}"
+        f" ha {descrever_tempo(evento.get('duracao_s'))}.",
+        o_que_fazer(frente, lateral),
         "",
-        f"Dispositivo: {evento.get('dispositivo') or 'desconhecido'}",
-        f"Horario: {str(quando).replace('T', ' ')}",
+        f"Aviso das {hora_curta(quando)}",
     ])
 
 
