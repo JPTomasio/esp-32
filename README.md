@@ -20,7 +20,7 @@ não é versionado — veja **Documentos das entregas**, no fim deste arquivo.
 
 - 1x ESP32 (DevKit v1 ou similar)
 - 2x módulo sensor de inclinação/vibração SW-520D
-- 1x buzzer (ativo, de preferência)
+- 1x buzzer ativo (opcional — sem ele, o alerta é o LED azul da placa + o aviso no Telegram)
 - Protoboard + jumpers
 - Cinta/elástico para prender os sensores no corpo
 
@@ -54,12 +54,18 @@ amostras de 1 segundo concordam. Sem esse filtro, o buzzer apitaria sem parar.
    -----                -------------      --------------      ------
    3V3   ------------->  VCC          ---->  VCC
    GND   ------------->  GND          ---->  GND          ---->  (-)
-   GPIO 14 <-----------  DO
-   GPIO 27 <--------------------------------  DO
-   GPIO 26 ------------------------------------------------->   (+)
+   GPIO 18 <-----------  DO
+   GPIO 21 <--------------------------------  DO
+   GPIO 26 ------------------------------------------------->   (+)  (opcional)
 ```
 
 O LED de alerta usa o LED azul embutido na placa (GPIO 2), não precisa ligar nada.
+
+Os sensores ficam no **GPIO 18 e 21** porque a DevKit V1 de 30 pinos cobre
+todos os furos de um lado da protoboard. Se você ligou em outros pinos e não
+sabe quais, grave `firmware/00_descobre_pinos/`: ele mostra qual GPIO muda
+quando você inclina o sensor. Os módulos do grupo têm a saída invertida
+(`SENSOR_LOGICA_INVERTIDA true`, já no `config.exemplo.h`).
 
 ## Ordem de execução
 
