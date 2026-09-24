@@ -323,6 +323,29 @@ def main():
     check("eventos contabilizados na nuvem", diagnostico["eventos_na_nuvem"], 4)
     check("nada pendente", diagnostico["pendentes_envio"], 0)
 
+    # -----------------------------------------------------------------------
+    print("\n8. Nuvem lenta: a postura aparece na hora mesmo assim")
+    # Com a thread de leitura ligada, o /api/status nao espera a nuvem: devolve
+    # a ultima leitura pronta. O alerta abaixo ainda nao subiu, e a leitura da
+    # nuvem em cache e anterior a ele -- como no hotspot, em que cada leitura
+    # demora segundos.
+    enviar_evento(cliente, "postura_corrigida", duracao=30)
+    app.sincronizar_uma_vez()
+    app._cache["payload"] = None
+    cliente.get("/api/status")                    # foto da nuvem: postura ok
+    requisicoes_antes = len(estado.requisicoes)
+
+    app.leitor_nuvem["ativo"] = True
+    app._cache["quando"] = 0                      # foto da nuvem ja vencida
+    enviar_evento(cliente, "alerta_postura", frente=True, duracao=5)
+    dados = cliente.get("/api/status").get_json()
+    app.leitor_nuvem["ativo"] = False
+
+    check("nao esperou a nuvem", len(estado.requisicoes), requisicoes_antes)
+    check("postura atual veio do banco local", dados["postura_ok"], False)
+    check("eixo atual veio do banco local", dados["inclinado_frente"], True)
+    check("historico continua vindo da nuvem", dados["origem"], "nuvem")
+
     servidor.shutdown()
 
     print()

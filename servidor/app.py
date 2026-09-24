@@ -62,6 +62,10 @@ LOTE_SINCRONIA = 50
 # viraria varias chamadas por segundo para a nuvem sem necessidade.
 CACHE_STATUS_S = 2.0
 
+# Liga quando a thread de leitura da nuvem sobe (so no servidor de verdade).
+# Sem ela -- nos testes, por exemplo -- o /api/status le a nuvem na hora.
+leitor_nuvem = {"ativo": False}
+
 # Intervalo minimo entre dois avisos no celular. O firmware manda um alerta por
 # episodio de postura ruim, mas quem esta com a cinta pode entortar e endireitar
 # varias vezes em poucos minutos -- sem esse respiro o celular viraria uma
@@ -545,34 +549,84 @@ def resumo_notificacao():
     }
 
 
-@app.get("/api/status")
-def status():
-    """Estado atual e estatisticas das ultimas 24 horas.
-
-    Le da nuvem. Se a nuvem nao responder, cai para o banco local e diz isso no
-    campo "origem" -- o dashboard mostra a diferenca em vez de fingir que esta
-    tudo bem.
-    """
-    with _trava_cache:
-        if _cache["payload"] and time.monotonic() - _cache["quando"] < CACHE_STATUS_S:
-            return jsonify(_cache["payload"])
-
+def ler_nuvem_uma_vez():
+    """Le o estado da nuvem (ou do banco local, se ela falhar) e guarda no cache."""
     if not nuvem.configurada():
         payload = status_local("nuvem nao configurada (servidor/.env)")
     else:
         try:
             payload = status_da_nuvem()
         except requests.RequestException as erro:
-            print(f"[nuvem] leitura falhou, usando banco local: {erro}")
+            print(f"[nuvem] leitura falhou, usando banco local: {erro}", flush=True)
             payload = status_local(f"nuvem inacessivel: {erro}")
-
-    # Fora do montar_resposta de proposito: o estado dos avisos nao vem do
-    # banco nem da nuvem, e vale igual nos dois caminhos (nuvem e local).
-    payload["notificacao"] = resumo_notificacao()
 
     with _trava_cache:
         _cache["quando"] = time.monotonic()
         _cache["payload"] = payload
+    return payload
+
+
+def laco_leitura_nuvem():
+    while True:
+        ler_nuvem_uma_vez()
+        time.sleep(CACHE_STATUS_S)
+
+
+def iniciar_leitura_nuvem():
+    """Le a nuvem numa thread propria, para o dashboard nunca esperar a internet.
+
+    Pelo hotspot do celular, cada leitura da nuvem levava de 2 a 5 s e as vezes
+    estourava o timeout de 8 s. Com o /api/status esperando a nuvem, o dashboard
+    congelava bem durante um alerta curto e nunca mostrava "Inadequada" (teste
+    de 24/09). Agora o /api/status so devolve a ultima leitura pronta.
+    """
+    leitor_nuvem["ativo"] = True
+    thread = threading.Thread(target=laco_leitura_nuvem, daemon=True)
+    thread.start()
+
+
+def estado_ao_vivo():
+    """Conexao e postura atuais, lidas do SQLite.
+
+    O ESP32 grava primeiro aqui, entao este e o estado mais novo que existe. A
+    nuvem recebe o mesmo evento segundos depois; esperar por ela so atrasaria
+    o cartao "Postura agora".
+    """
+    with closing(conectar()) as conexao:
+        ultimo = conexao.execute(
+            "SELECT * FROM eventos ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    if ultimo is None:
+        return {}
+
+    atual = montar_resposta("local", ultimo, {"total": 0, "segundos": 0}, [], 0)
+    campos = ("conectado", "dispositivo", "postura_ok",
+              "inclinado_frente", "inclinado_lateral", "visto_em")
+    return {campo: atual[campo] for campo in campos}
+
+
+@app.get("/api/status")
+def status():
+    """Estado atual e estatisticas das ultimas 24 horas.
+
+    Estatisticas e historico vem da nuvem. Se a nuvem nao responder, caem para o
+    banco local e o campo "origem" diz isso -- o dashboard mostra a diferenca em
+    vez de fingir que esta tudo bem. Conexao e postura atuais vem sempre do
+    banco local (ver estado_ao_vivo).
+    """
+    with _trava_cache:
+        payload = _cache["payload"]
+        vencido = time.monotonic() - _cache["quando"] >= CACHE_STATUS_S
+
+    if payload is None or (vencido and not leitor_nuvem["ativo"]):
+        payload = ler_nuvem_uma_vez()
+
+    payload = dict(payload, **estado_ao_vivo())
+
+    # Fora do montar_resposta de proposito: o estado dos avisos nao vem do
+    # banco nem da nuvem, e vale igual nos dois caminhos (nuvem e local).
+    payload["notificacao"] = resumo_notificacao()
 
     return jsonify(payload)
 
@@ -849,6 +903,7 @@ if __name__ == "__main__":
 
     iniciar_sincronizacao()
     iniciar_notificacoes()
+    iniciar_leitura_nuvem()
 
     print("Dashboard: http://localhost:5000")
     # host 0.0.0.0 e obrigatorio para o ESP32 conseguir alcancar o servidor.
