@@ -29,6 +29,7 @@ app.py, que assina as requisicoes.
 """
 
 import os
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -41,6 +42,19 @@ VIEW_ESTATISTICAS = "estatisticas_24h"
 # Tempo maximo de espera das chamadas HTTPS. Curto de proposito: se a nuvem
 # demorar, o dashboard cai para o banco local em vez de travar a tela.
 TIMEOUT_S = 8
+
+# Uma sessao HTTP por thread, para reaproveitar a conexao HTTPS (keep-alive).
+# Sem isso, cada chamada abre TCP + TLS de novo: pelo hotspot do celular isso
+# custava ~0,5 s por chamada, e o dashboard faz quatro por leitura. Por thread
+# porque a Session do requests nao e garantida como thread-safe, e aqui ha tres
+# threads falando com a nuvem (sincronia, leitura do dashboard e o Flask).
+_sessoes = threading.local()
+
+
+def sessao():
+    if not hasattr(_sessoes, "atual"):
+        _sessoes.atual = requests.Session()
+    return _sessoes.atual
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +203,7 @@ def enviar_eventos(eventos):
         for evento in eventos
     ]
 
-    resposta = requests.post(
+    resposta = sessao().post(
         endpoint(TABELA),
         json=corpo,
         headers=cabecalhos({
@@ -214,7 +228,7 @@ def enviar_eventos(eventos):
 # ---------------------------------------------------------------------------
 
 def buscar(recurso, parametros=None, cabecalhos_extra=None):
-    resposta = requests.get(
+    resposta = sessao().get(
         endpoint(recurso),
         params=parametros,
         headers=cabecalhos(cabecalhos_extra),

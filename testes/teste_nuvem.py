@@ -293,6 +293,14 @@ def main():
     check("tentativa de envio nao confirma nada", app.sincronizar_uma_vez(), 0)
     check("evento aguardando na fila", app.contar_pendentes(), 1)
 
+    # Uma falha isolada nao derruba o selo: a leitura da nuvem de agora ha pouco
+    # (secao 3) continua valendo por TOLERANCIA_NUVEM_S.
+    app._cache["quando"] = 0
+    dados = cliente.get("/api/status").get_json()
+    check("falha isolada mantem a ultima leitura da nuvem", dados["origem"], "nuvem")
+    check("com a postura atual ao vivo", dados["postura_ok"], False)
+
+    # Sem leitura boa recente (aqui, cache zerado), cai para o banco local.
     app._cache["payload"] = None
     dados = cliente.get("/api/status").get_json()
     check("dashboard cai para o banco local", dados["origem"], "local")

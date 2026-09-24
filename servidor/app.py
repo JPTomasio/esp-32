@@ -62,6 +62,11 @@ LOTE_SINCRONIA = 50
 # viraria varias chamadas por segundo para a nuvem sem necessidade.
 CACHE_STATUS_S = 2.0
 
+# Uma leitura da nuvem que falha sozinha (um pico de latencia no hotspot) nao
+# deve trocar o dashboard para o banco local: enquanto a ultima leitura boa
+# tiver menos que isto, ela continua valendo. Queda de verdade passa disso.
+TOLERANCIA_NUVEM_S = 30.0
+
 # Liga quando a thread de leitura da nuvem sobe (so no servidor de verdade).
 # Sem ela -- nos testes, por exemplo -- o /api/status le a nuvem na hora.
 leitor_nuvem = {"ativo": False}
@@ -557,12 +562,21 @@ def ler_nuvem_uma_vez():
         try:
             payload = status_da_nuvem()
         except requests.RequestException as erro:
+            with _trava_cache:
+                anterior = _cache["payload"]
+                idade = time.monotonic() - _cache.get("nuvem_ok_em", 0.0)
+            if anterior and anterior.get("origem") == "nuvem" and idade < TOLERANCIA_NUVEM_S:
+                print(f"[nuvem] leitura falhou, mantendo a anterior ({idade:.0f}s): {erro}",
+                      flush=True)
+                return anterior
             print(f"[nuvem] leitura falhou, usando banco local: {erro}", flush=True)
             payload = status_local(f"nuvem inacessivel: {erro}")
 
     with _trava_cache:
         _cache["quando"] = time.monotonic()
         _cache["payload"] = payload
+        if payload.get("origem") == "nuvem":
+            _cache["nuvem_ok_em"] = _cache["quando"]
     return payload
 
 
