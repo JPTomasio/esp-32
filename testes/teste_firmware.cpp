@@ -22,8 +22,12 @@ void check(const char* nome, long obtido, long esperado){
 
 // Avanca o tempo simulado rodando loop(), com os sensores na posicao dada.
 void avancar(unsigned long ms, bool frente, bool lateral){
-  g_pinos[PINO_SENSOR_FRENTE]  = frente  ? LOW : HIGH;  // LOW = switch fechado
-  g_pinos[PINO_SENSOR_LATERAL] = lateral ? LOW : HIGH;
+  // Sem inversao, inclinado = LOW (switch fechado). Com SENSOR_LOGICA_INVERTIDA
+  // o modulo le HIGH quando inclinado, entao o nivel simulado acompanha o config.h.
+  int nivelInclinado = SENSOR_LOGICA_INVERTIDA ? HIGH : LOW;
+  int nivelReto      = SENSOR_LOGICA_INVERTIDA ? LOW : HIGH;
+  g_pinos[PINO_SENSOR_FRENTE]  = frente  ? nivelInclinado : nivelReto;
+  g_pinos[PINO_SENSOR_LATERAL] = lateral ? nivelInclinado : nivelReto;
   unsigned long fim = g_millis + ms;
   while(g_millis < fim){ g_millis += 5; loop(); }
 }

@@ -21,14 +21,16 @@
 #define DISPOSITIVO_ID "esp32-postura-01"
 
 // ---------- Pinos ----------
-#define PINO_SENSOR_FRENTE   14   // sensor colado inclinado para frente
-#define PINO_SENSOR_LATERAL  27   // sensor colado na lateral do corpo
-#define PINO_BUZZER          26
+#define PINO_SENSOR_FRENTE   18   // sensor colado inclinado para frente
+#define PINO_SENSOR_LATERAL  21   // sensor colado na lateral do corpo
+#define PINO_BUZZER          26   // opcional: sem buzzer, o alerta e o LED + Telegram
 #define PINO_LED             2    // LED azul embutido na maioria das placas ESP32
 
 // Alguns modulos SW-520D tem a saida invertida (comparador LM393).
 // Se no teste da Etapa 1 os valores aparecerem trocados, mude para true.
-#define SENSOR_LOGICA_INVERTIDA false
+// Os modulos do grupo leem LOW parados e HIGH inclinados (conferido na
+// Etapa 0 em 24/09), por isso true.
+#define SENSOR_LOGICA_INVERTIDA true
 
 // Coloque false se o seu buzzer for PASSIVO (nao apita sozinho com 3V3).
 // Buzzer ativo = so ligar na energia e ele apita. E o mais comum em kits.

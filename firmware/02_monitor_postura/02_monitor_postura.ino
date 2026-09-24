@@ -10,10 +10,13 @@
  *
  * LIGACAO
  *
- *   Sensor frente     Sensor lateral    Buzzer
+ *   Sensor frente     Sensor lateral    Buzzer (opcional)
  *   VCC -> 3V3        VCC -> 3V3        (+) -> GPIO 26
  *   GND -> GND        GND -> GND        (-) -> GND
- *   DO  -> GPIO 14    DO  -> GPIO 27
+ *   DO  -> GPIO 18    DO  -> GPIO 21
+ *
+ *   Sem buzzer, o alerta local e o LED azul da placa (GPIO 2) e o servidor
+ *   avisa no celular pelo Telegram.
  *
  * MONTAGEM NO CORPO
  *   Os sensores vao presos na cinta, na altura das costas.

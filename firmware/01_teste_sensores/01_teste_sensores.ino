@@ -14,13 +14,14 @@
  *   Sensor A (frente/costas)      Sensor B (lateral)
  *   VCC -> 3V3                    VCC -> 3V3
  *   GND -> GND                    GND -> GND
- *   DO  -> GPIO 14                DO  -> GPIO 27
+ *   DO  -> GPIO 18                DO  -> GPIO 21
  *
  * Se o seu modulo tiver 4 pinos (VCC/GND/DO/AO), ignore o AO.
+ * Nao sabe em qual GPIO ligou? Rode antes a Etapa 0 (00_descobre_pinos).
  */
 
-const int PINO_SENSOR_A = 14;
-const int PINO_SENSOR_B = 27;
+const int PINO_SENSOR_A = 18;
+const int PINO_SENSOR_B = 21;
 
 // A esfera do SW-520D balanca muito. Amostramos rapido e contamos quantas
 // leituras deram "inclinado" no ultimo segundo, em vez de confiar em 1 leitura.
